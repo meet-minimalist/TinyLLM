@@ -8,18 +8,9 @@
 
 from __future__ import annotations
 
-import logging
 from abc import ABC
 
-logger = logging.getLogger()
-logger.setLevel(logging.DEBUG)
-formatter = logging.Formatter(
-    "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
-
-console_handler = logging.StreamHandler()
-console_handler.setFormatter(formatter)
-logger.addHandler(console_handler)
+from utils.misc import logger
 
 
 class Config(ABC):
@@ -94,23 +85,3 @@ def config_factory(model_type: str) -> Config:
         raise NotImplementedError(
             f"No model config implemented for model type: {model_type}"
         )
-
-
-def configure_logging(log_file: str) -> None:
-    """
-    Configure the logger to dump the logs in given file.
-
-    Args:
-        log_file (str): Log file to store the logs.
-    """
-    for handler in logger.handlers:
-        logger.removeHandler(handler)
-
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
-
-    if log_file:
-        file_handler = logging.FileHandler(log_file)
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)

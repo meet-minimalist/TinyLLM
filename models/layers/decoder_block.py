@@ -23,13 +23,15 @@ class TransformerDecoderBlock(nn.Module):
 
         Args:
             emb_dim (int): Embedding dimension for input tensor.
-            num_heads (int): Number of attention heads
+            num_heads (int): Number of attention heads.
             ff_multiplier (int): Feed forward layer dimensionality multiplier.
             drop_prob (float): Dropout probability for multi head attention and
                 feed forward layer.
         """
         super().__init__()
-        self.mmha_layer = MaskedMultiHeadAttention(emb_dim, num_heads, drop_prob)
+        self.mmha_layer = MaskedMultiHeadAttention(
+            emb_dim, num_heads, drop_prob
+        )
         self.ff_layer = FFLayer(emb_dim, ff_multiplier, drop_prob)
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:

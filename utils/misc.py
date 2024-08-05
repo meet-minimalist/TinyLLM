@@ -6,23 +6,16 @@
  # @ Description:
  """
 
-import logging
+import datetime
+import os
 
 from transformers import PreTrainedTokenizer
 
+import wandb
+from models.helper import Config
 from utils.lr_utils.cosine_annealing_lr import CosineAnnealing
 from utils.lr_utils.exp_decay_lr import ExpDecay
 from utils.lr_utils.lr_scheduler import LearningRateScheduler
-
-logger = logging.getLogger()
-logger.setLevel(logging.DEBUG)
-formatter = logging.Formatter(
-    "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
-
-console_handler = logging.StreamHandler()
-console_handler.setFormatter(formatter)
-logger.addHandler(console_handler)
 
 
 def get_tokenizer(model_type: str) -> PreTrainedTokenizer:
@@ -77,21 +70,38 @@ def lr_scheduler_factory(
     return scheduler_class(*args, **kwargs)
 
 
-def configure_logging(log_file: str) -> None:
-    """
-    Configure the logger to dump the logs in given file.
+def init_wandb(
+    train_config: Config, model_config: Config, resume_wandb_id: int
+) -> None:
+    """Initiate the weights and bias tracking. To be called at the start of experiment.
 
     Args:
-        log_file (str): Log file to store the logs.
+        train_config (Config): Config instance representing training parameters.
+        model_config (Config): Config instance representing model architecture
+            parameters.
+        resume_wandb_id (int): Weights and Bias tracking id to be reused in
+            case of resuming training. Defaults to None.
     """
-    for handler in logger.handlers:
-        logger.removeHandler(handler)
+    config_dict = {**train_config.to_dict(), **model_config.to_dict()}
+    wandb.init(
+        project="TinyLLM",
+        config=config_dict,
+        resume="allow",
+        id=resume_wandb_id,
+    )
 
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
 
-    if log_file:
-        file_handler = logging.FileHandler(log_file)
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
+def get_exp_path(base_dir: str) -> str:
+    """Function to get the directory to same the experiment related data.
+
+    Args:
+        base_dir (str): Directory to store all experiments.
+
+    Returns:
+        str: Path for current experiment.
+    """
+    start_time = datetime.datetime.now()
+    exp_name = start_time.strftime("%Y_%m_%d_%H_%M_%S")
+    cur_exp_path = os.path.join(base_dir, exp_name)
+    os.makedirs(cur_exp_path, exist_ok=True)
+    return cur_exp_path

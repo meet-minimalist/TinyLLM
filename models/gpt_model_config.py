@@ -25,12 +25,12 @@ class GPTConfig(Config):
 
     vocab_size = 50257
     emb_dim = 128
-    max_seq_len = 2048
     num_heads = 4
     drop_prob = 0.1
     ff_multiplier = 1
     num_blocks = 2
 
 
-g = GPTConfig()
-g.print_config()
+if __name__ == "__main__":
+    g = GPTConfig()
+    g.print_config()

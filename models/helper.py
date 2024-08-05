@@ -8,12 +8,21 @@
 
 from __future__ import annotations
 
+import os
 from abc import ABC
+from datetime import datetime
 
-from utils.misc import logger
+from tabulate import tabulate
+
+from utils.logger_utils import logger
 
 
 class Config(ABC):
+    exp_time = datetime.now().strftime("%Y-%m-%d-%H-%M")
+    base_exp_path = f"./exp/{exp_time}"
+    os.makedirs(base_exp_path, exist_ok=True)
+    log_file = os.path.join(base_exp_path, "log.txt")
+
     @classmethod
     def print_config(cls: Config):
         """
@@ -31,11 +40,33 @@ class Config(ABC):
                 continue
             class_vars[name] = value
 
-        logger.info("#" * 49)
+        logger.info("#" * 50)
         logger.info(f"#{cls.__name__.center(47)}#")
-        for name, value in class_vars.items():
-            logger.info(f"#\t{name} \t\t: {value}\t\t#")
-        logger.info("#" * 49)
+        data = ([name, value] for (name, value) in class_vars.items())
+        table_data = tabulate(data, tablefmt="grid")
+        table_data_lines = table_data.split("\n")
+        for line in table_data_lines:
+            logger.info(line)
+        logger.info("#" * 50)
+
+    @classmethod
+    def to_dict(cls: Config):
+        """
+        Print the static variables (class variables) of the class.
+        """
+        class_vars = {}
+        for name, value in cls.__dict__.items():
+            if callable(value):
+                continue
+            if isinstance(value, classmethod) or isinstance(
+                value, staticmethod
+            ):
+                continue
+            if name.startswith("__") or name == "_abc_impl":
+                continue
+            class_vars[name] = value
+
+        return class_vars
 
 
 def model_factory(model_type: str, config: Config):
@@ -63,7 +94,7 @@ def model_factory(model_type: str, config: Config):
         )
 
 
-def config_factory(model_type: str) -> Config:
+def model_config_factory(model_type: str) -> Config:
     """
     Get the model config based on the model_type.
 
@@ -78,9 +109,33 @@ def config_factory(model_type: str) -> Config:
         Config: Config class return for given model_type.
     """
     if model_type == "gpt":
-        from models.gpt_config import GPTConfig
+        from models.gpt_model_config import GPTConfig
 
         return GPTConfig
+    else:
+        raise NotImplementedError(
+            f"No model config implemented for model type: {model_type}"
+        )
+
+
+def train_config_factory(model_type: str) -> Config:
+    """
+    Get the model training config based on the model_type.
+
+    Args:
+        model_type (str): Name of the model type.
+
+    Raises:
+        NotImplementedError: If unsupported model_type is provided then this
+            exception will be thrown.
+
+    Returns:
+        Config: Config class return for given model_type.
+    """
+    if model_type == "gpt":
+        from models.gpt_train_config import GPTTrainConfig
+
+        return GPTTrainConfig
     else:
         raise NotImplementedError(
             f"No model config implemented for model type: {model_type}"

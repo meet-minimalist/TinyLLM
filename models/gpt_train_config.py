@@ -33,6 +33,9 @@ class GPTTrainConfig(Config):
     track_gradients = False
     fp16_training = True
 
+    def __init__(self):
+        super().__init__(True)
+
 
 if __name__ == "__main__":
     g = GPTTrainConfig()

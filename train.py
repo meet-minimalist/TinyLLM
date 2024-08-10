@@ -14,7 +14,6 @@ from torch.cuda.amp import GradScaler, autocast
 from torch.nn import CrossEntropyLoss
 from tqdm import tqdm
 
-import wandb
 from dataset_helper import DatasetHelper
 from models.helper import (
     model_config_factory,
@@ -82,6 +81,8 @@ def run(model_type):
         scaler = GradScaler()
 
     if train_config.use_wandb:
+        import wandb
+
         init_wandb(train_config, model_config, train_config.resume_wandb_id)
     g_step = 0
     if train_config.use_wandb and train_config.track_gradients:

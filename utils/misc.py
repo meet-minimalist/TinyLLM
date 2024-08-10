@@ -11,7 +11,6 @@ import os
 
 from transformers import PreTrainedTokenizer
 
-import wandb
 from models.helper import Config
 from utils.lr_utils.cosine_annealing_lr import CosineAnnealing
 from utils.lr_utils.exp_decay_lr import ExpDecay
@@ -82,6 +81,8 @@ def init_wandb(
         resume_wandb_id (int): Weights and Bias tracking id to be reused in
             case of resuming training. Defaults to None.
     """
+    import wandb
+
     config_dict = {**train_config.to_dict(), **model_config.to_dict()}
     wandb.init(
         project="TinyLLM",

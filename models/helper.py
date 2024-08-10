@@ -18,10 +18,12 @@ from utils.logger_utils import logger
 
 
 class Config(ABC):
-    exp_time = datetime.now().strftime("%Y-%m-%d-%H-%M")
-    base_exp_path = f"./exp/{exp_time}"
-    os.makedirs(base_exp_path, exist_ok=True)
-    log_file = os.path.join(base_exp_path, "log.txt")
+    def __init__(self, init_exp=False):
+        if init_exp:
+            exp_time = datetime.now().strftime("%Y-%m-%d-%H-%M")
+            self.base_exp_path = f"./exp/{exp_time}"
+            os.makedirs(self.base_exp_path, exist_ok=True)
+            self.log_file = os.path.join(self.base_exp_path, "log.txt")
 
     @classmethod
     def print_config(cls: Config):
@@ -135,7 +137,7 @@ def train_config_factory(model_type: str) -> Config:
     if model_type == "gpt":
         from models.gpt_train_config import GPTTrainConfig
 
-        return GPTTrainConfig
+        return GPTTrainConfig()
     else:
         raise NotImplementedError(
             f"No model config implemented for model type: {model_type}"

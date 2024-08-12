@@ -8,9 +8,8 @@
 
 import os
 
-os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 import torch
-from torch.cuda.amp import GradScaler, autocast
+from torch import GradScaler, autocast
 from torch.nn import CrossEntropyLoss
 from tqdm import tqdm
 
@@ -26,11 +25,10 @@ from utils.misc import get_tokenizer, init_wandb, lr_scheduler_factory
 
 
 def run(model_type):
-    cuda = torch.device("cuda")
-
     train_config = train_config_factory(model_type)
     exp_path = train_config.base_exp_path
     configure_logging(train_config.log_file)
+    cuda = torch.device(train_config.device)
 
     model_config = model_config_factory(model_type)
     model_config.max_seq_len = (
@@ -77,8 +75,7 @@ def run(model_type):
         ignore_index=tokenizer.convert_tokens_to_ids(tokenizer.pad_token),
     )
 
-    if train_config.fp16_training:
-        scaler = GradScaler()
+    scaler = GradScaler()
 
     if train_config.use_wandb:
         import wandb
@@ -98,19 +95,10 @@ def run(model_type):
             attn_mask = attn_mask.to(cuda, non_blocking=True)
             labels = labels.to(cuda, non_blocking=True)
 
-            if train_config.fp16_training:
-                with autocast():
-                    logits = model(input_ids, attn_mask)
-
-                    logits = logits.view(-1, logits.shape[2])
-                    labels = labels.view(-1).to(torch.long)
-
-                    # We would take mean across all sequence length and all batches.
-                    loss = loss_fn(logits, labels) * batch_size
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
-            else:
+            with autocast(
+                device_type=train_config.device,
+                enabled=train_config.fp16_training,
+            ):
                 logits = model(input_ids, attn_mask)
 
                 logits = logits.view(-1, logits.shape[2])
@@ -118,12 +106,11 @@ def run(model_type):
 
                 # We would take mean across all sequence length and all batches.
                 loss = loss_fn(logits, labels) * batch_size
-                loss.backward()
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
 
             lr = lr_scheduler.step(g_step, optimizer)
-
-            if not train_config.fp16_training:
-                optimizer.step()
 
             logger.info(
                 f"Epoch: {eps_num+1}/{train_config.num_epochs}, Batch: {batch_idx}/{len(train_loader)}, Batch Size: {batch_size}, Loss: {loss:.4f}, LR: {lr:.4f}"

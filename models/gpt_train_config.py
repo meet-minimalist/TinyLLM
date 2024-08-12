@@ -27,6 +27,7 @@ class GPTTrainConfig(Config):
     init_lr = 1e-3
     warmup_epochs = 2
     label_smoothing = 0.1
+    device = "cuda:0"
 
     use_wandb = True
     resume_wandb_id = None

@@ -62,6 +62,7 @@ class GPTModel(nn.Module):
             mask.shape[0], 1, 1, mask.shape[1]
         )  # [batch, 1, 1, seq]
         mask = 1 - mask  # invert the mask
+        self.MAX_NEG = self.MAX_NEG.to(mask.device)
         mask = torch.where(mask == 0, 0, self.MAX_NEG)
         return mask  # [batch, 1, 1, seq]
 

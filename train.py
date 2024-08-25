@@ -6,7 +6,7 @@
  # @ Description:
  """
 
-import os
+import argparse
 
 import torch
 from torch import GradScaler, autocast
@@ -105,7 +105,8 @@ def run(model_type):
                 labels = labels.view(-1).to(torch.long)
 
                 # We would take mean across all sequence length and all batches.
-                loss = loss_fn(logits, labels) * batch_size
+                loss = loss_fn(logits, labels)
+                ppl = torch.exp(loss)
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
@@ -113,12 +114,15 @@ def run(model_type):
             lr = lr_scheduler.step(g_step, optimizer)
 
             logger.info(
-                f"Epoch: {eps_num+1}/{train_config.num_epochs}, Batch: {batch_idx}/{len(train_loader)}, Batch Size: {batch_size}, Loss: {loss:.4f}, LR: {lr:.4f}"
+                f"Epoch: {eps_num+1}/{train_config.num_epochs}, Batch: {batch_idx}/{len(train_loader)}, "
+                f"Batch Size: {batch_size}, Loss: {loss:.4f}, "
+                f"PPL: {ppl:.4f}, LR: {lr:.4f}"
             )
             metrics = {
                 "Epoch": eps_num + 1,
                 "Batch": batch_idx + 1,
                 "Loss": loss,
+                "Perplexity": ppl,
                 "LR": lr,
             }
             if train_config.use_wandb:
@@ -127,6 +131,7 @@ def run(model_type):
 
         model.eval()
         total_eval_loss = 0
+        total_eval_ppl = 0
         with torch.no_grad():
             for input_ids, attn_mask, labels in tqdm(valid_loader):
                 input_ids = input_ids.to(cuda, non_blocking=True)
@@ -140,11 +145,17 @@ def run(model_type):
                 labels = labels.view(-1).to(torch.long)
 
                 # We would take mean across all sequence length and all batches.
-                loss = loss_fn(logits, labels) * batch_size
+                loss = loss_fn(logits, labels)
+                ppl = torch.exp(loss)
                 total_eval_loss += loss.item()
+                total_eval_ppl += ppl.item()
 
         avg_eval_loss = total_eval_loss / len(valid_loader)
-        logger.info(f"Epoch {eps_num+1}, Evaluation Loss: {avg_eval_loss:.4f}")
+        avg_eval_ppl = total_eval_ppl / len(valid_loader)
+        logger.info(
+            f"Epoch {eps_num+1}, Evaluation Loss: {avg_eval_loss:.4f}, "
+            f"Evaluation Perplexity: {avg_eval_ppl:.4f}"
+        )
         if train_config.use_wandb:
             metrics = {"Test Loss": loss}
             wandb.log(metrics, step=g_step)
@@ -156,6 +167,7 @@ def run(model_type):
             "epoch": eps_num,
             "global_step": g_step,
             "test_loss": avg_eval_loss,
+            "test_ppl": avg_eval_ppl,
             "model": model.state_dict(),
             "optimizer": optimizer.state_dict(),
             "scaler": (
@@ -169,4 +181,9 @@ def run(model_type):
 
 
 if __name__ == "__main__":
-    run(model_type="gpt")
+    parser = argparse.ArgumentParser(description="TinyLLM Training help")
+    parser.add_argument(
+        "-m", "--model_type", type=str, help="Type of the model", required=True
+    )
+    args = parser.parse_args()
+    run(model_type=args.model_type)

@@ -10,9 +10,9 @@ import os
 
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 import torch
+import train_config
 from torch.nn import CrossEntropyLoss
 
-import train_config
 from dataset_helper import DatasetHelper
 from models.helper import config_factory, model_factory
 from utils.misc import get_tokenizer, lr_scheduler_factory

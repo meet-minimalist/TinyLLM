@@ -54,6 +54,7 @@ class MaskedMultiHeadAttention(nn.Module):
         causal_mask = torch.triu(torch.ones_like(q_k_mm), diagonal=1).to(
             torch.bool
         )
+        self.MAX_NEG = self.MAX_NEG.to(causal_mask.device)
         causal_mask = torch.where(causal_mask == True, self.MAX_NEG, 0)
         q_k_mm += causal_mask  # [batch, num_head, seq, seq]
         q_k_mm += attn_mask  # [batch, num_head, seq, seq]

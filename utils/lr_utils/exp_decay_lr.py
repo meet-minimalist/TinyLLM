@@ -9,8 +9,8 @@ import sys
 
 import numpy as np
 
+from utils.logger_utils import logger
 from utils.lr_utils.lr_scheduler import LearningRateScheduler
-from utils.misc import logger
 
 
 class ExpDecay(LearningRateScheduler):

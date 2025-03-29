@@ -38,7 +38,7 @@ class LearnablePositionalEmbeddings(nn.Module):
         """
         batch_seq_len = x.shape[1]
         assert (
-            batch_seq_len < self.max_seq_len
+            batch_seq_len <= self.max_seq_len
         ), "Sequence length of the batch is more than max sequence length."
         pos_emb_value = self.pos_emb[:, :batch_seq_len, :]
         x = x + pos_emb_value  # [batch, seq, emb_dim]

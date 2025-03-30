@@ -55,7 +55,7 @@ class MaskedMultiHeadAttention(nn.Module):
             torch.bool
         )
         self.MAX_NEG = self.MAX_NEG.to(causal_mask.device)
-        causal_mask = torch.where(causal_mask == True, self.MAX_NEG, 0)
+        causal_mask = torch.where(causal_mask, self.MAX_NEG, 0)
         q_k_mm += causal_mask  # [batch, num_head, seq, seq]
         q_k_mm += attn_mask  # [batch, num_head, seq, seq]
         q_k_mm /= self.sqrt_d  # [batch, num_head, seq, seq]
@@ -75,3 +75,17 @@ class MaskedMultiHeadAttention(nn.Module):
         res = x + self.dropout_layer(qkv_mm)  # [batch, seq, emb_dim]
         res = self.layer_norm(res)  # [batch, seq, emb_dim]
         return res
+
+
+if __name__ == "__main__":
+    from models.gpt_config import GPTConfig
+
+    config = GPTConfig()
+    mmha_layer = MaskedMultiHeadAttention(
+        config.emb_dim, config.num_heads, config.drop_prob
+    )
+    mmha_layer.to("cuda")
+    input_ids = torch.randn(1, 128, config.emb_dim).to(torch.float32).to("cuda")
+    attn_mask = torch.randn(1, 1, 128, 128).to(torch.float32).to("cuda")
+    mmha_layer = torch.compile(mmha_layer)
+    mmha_layer(input_ids, attn_mask)

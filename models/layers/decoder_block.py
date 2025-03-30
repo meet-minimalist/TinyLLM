@@ -52,3 +52,20 @@ class TransformerDecoderBlock(nn.Module):
         mmha_output = self.mmha_layer(x, mask)  # [batch, seq, emb_dim]
         ff_output = self.ff_layer(mmha_output)  # [batch, seq, emb_dim]
         return ff_output
+
+
+if __name__ == "__main__":
+    from models.gpt_config import GPTConfig
+
+    config = GPTConfig
+    b = TransformerDecoderBlock(
+        config.emb_dim,
+        config.num_heads,
+        config.ff_multiplier,
+        config.drop_prob,
+    )
+    b.to("cuda")
+    input_ids = torch.randn(1, 128, config.emb_dim).to(torch.float32).to("cuda")
+    attn_mask = torch.randn(1, 1, 1, 128).to(torch.float32).to("cuda")
+    b = torch.compile(b)
+    b(input_ids, attn_mask)

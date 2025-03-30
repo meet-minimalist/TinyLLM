@@ -30,14 +30,14 @@ def run(args):
     device = torch.device(train_config.device)
     model = model_factory(args.model_name, model_config)
     model.to(device)
-    # model = torch.compile(model)
+    model = torch.compile(model)
 
     tokenizer = get_tokenizer(train_config.model_type)
 
     train_helper = DatasetHelper(
         tokenizer,
         train_config.batch_size,
-        train_config.avg_seq_len_in_batch,
+        train_config.max_seq_len,
         train_config.num_workers,
         train_config.persistent_workers,
         train_config.use_pin_memory,
@@ -47,7 +47,7 @@ def run(args):
     valid_helper = DatasetHelper(
         tokenizer,
         train_config.batch_size,
-        train_config.avg_seq_len_in_batch,
+        train_config.max_seq_len,
         train_config.num_workers,
         train_config.persistent_workers,
         train_config.use_pin_memory,
@@ -68,6 +68,7 @@ def run(args):
 
     if train_config.fp16_training:
         scaler = GradScaler()
+
     g_step = 0
     for eps_num in range(train_config.num_epochs):
         model.train()

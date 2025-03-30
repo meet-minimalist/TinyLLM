@@ -16,12 +16,13 @@ class GPTConfig(Config):
 
     # vocab_size = 50257  # pad it to make it a multiple of 64 == 50304
     vocab_size = 50304
-    emb_dim = 128
-    max_seq_len = 512
-    num_heads = 2
+    emb_dim = 256
+    max_seq_len = 1024
+    num_heads = 4
     drop_prob = 0.1
     ff_multiplier = 1
-    num_blocks = 2
+    num_blocks = 4
+    tie_weights = True
 
 
 if __name__ == "__main__":

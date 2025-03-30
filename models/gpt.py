@@ -41,9 +41,9 @@ class GPTModel(nn.Module):
         )
         self.MAX_NEG = torch.tensor(float("-inf"))
         self.lm_head = nn.Linear(config.emb_dim, config.vocab_size)
-        self.lm_head.weight = nn.Parameter(
-            self.emb_layer.weight
-        )  # sharing of weights between embedding layer and language model head
+        if config.tie_weights:
+            # sharing of weights between embedding layer and language model head
+            self.lm_head.weight = self.emb_layer.weight
 
     def update_mask(self, mask: torch.Tensor) -> torch.Tensor:
         """
@@ -62,8 +62,9 @@ class GPTModel(nn.Module):
             mask.shape[0], 1, 1, mask.shape[1]
         )  # [batch, 1, 1, seq]
         mask = 1 - mask  # invert the mask
+        mask = mask.to(torch.bool)
         self.MAX_NEG = self.MAX_NEG.to(mask.device)
-        mask = torch.where(mask == 0, 0, self.MAX_NEG)
+        mask = torch.where(mask, self.MAX_NEG, 0)
         return mask  # [batch, 1, 1, seq]
 
     def forward(
@@ -87,3 +88,17 @@ class GPTModel(nn.Module):
 
         x = self.lm_head(x)  # [batch, seq, vocab_size]
         return x
+
+
+if __name__ == "__main__":
+    from models.gpt_config import GPTConfig
+    from torchinfo import summary
+
+    c = GPTConfig()
+    model = GPTModel(c)
+    model.to("cuda")
+    input_ids = torch.zeros(2, 128).to(torch.int32).to("cuda")
+    attn_mask = torch.zeros(2, 128).to(torch.int32).to("cuda")
+    torch.compile(model)
+    model(input_ids, attn_mask)
+    summary(model, input_data=[input_ids, attn_mask])

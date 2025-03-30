@@ -19,7 +19,6 @@ class GPTTrainConfig(Config):
     device = "cuda"
     num_epochs = 10
     batch_size = 4
-    avg_seq_len_in_batch = 1024
     max_seq_len = 1024
     num_workers = 4
     persistent_workers = True

@@ -64,3 +64,14 @@ class QKVGen(nn.Module):
         k = self.reshape_tensor(k)  # [batch, num_head, seq, emb_dim_per_head]
         v = self.reshape_tensor(v)  # [batch, num_head, seq, emb_dim_per_head]
         return q, k, v
+
+
+if __name__ == "__main__":
+    from models.gpt_config import GPTConfig
+
+    config = GPTConfig()
+    qkv = QKVGen(config.emb_dim, config.num_heads)
+    qkv.to("cuda")
+    input_ids = torch.randn(1, 128, config.emb_dim).to(torch.float32).to("cuda")
+    qkv = torch.compile(qkv)
+    qkv(input_ids)

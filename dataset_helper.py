@@ -107,12 +107,11 @@ class DatasetHelper:
         dataset = load_dataset("roneneldan/TinyStories", split=split)
 
         self.tokenizer = tokenizer
-        self.pad_token_id = torch.tensor(
-            [tokenizer.convert_tokens_to_ids(tokenizer.pad_token)]
-        )
+        self.pad_token_id = torch.tensor([tokenizer.pad_token_id])
         self.bos_token_id = torch.tensor([tokenizer.bos_token_id])
         self.eos_token_id = torch.tensor([tokenizer.eos_token_id])
 
+        self.max_len = seq_len
         batch_sampler = BatchSamplerSimilarLength(
             dataset, batch_size, seq_len, shuffle=True
         )
@@ -139,7 +138,12 @@ class DatasetHelper:
 
         for data in batch_data:
             text = data["text"]
-            input_ids = self.tokenizer.encode(text, return_tensors="pt")[0]
+            input_ids = self.tokenizer.encode(
+                text,
+                return_tensors="pt",
+                max_length=self.max_len,
+                truncation=True,
+            )[0]
             input_ids = torch.cat(
                 [self.bos_token_id, input_ids, self.eos_token_id], dim=0
             )

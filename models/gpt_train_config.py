@@ -16,7 +16,6 @@ class GPTTrainConfig(Config):
 
     model_type = "gpt"
 
-    device = "cuda"
     num_epochs = 10
     batch_size = 4
     max_seq_len = 1024

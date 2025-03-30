@@ -14,6 +14,7 @@ import torch
 from datasets import load_dataset
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader, Sampler
+from transformers import PreTrainedTokenizer
 
 
 class BatchSamplerSimilarLength(Sampler):
@@ -31,7 +32,8 @@ class BatchSamplerSimilarLength(Sampler):
         Args:
             dataset_iterator (datasets.Dataset): Dataset iterator.
             batch_size (int): Batch size to be used to compute upper limit of
-                tokens.
+                tokens in a given batch. This will be directly correlated to
+                available GPU memory.
             seq_len (int): Sequence length to be used to compute upper limit of
                 tokens.
             shuffle (bool, optional): Shuffle the dataset before sorting and
@@ -92,14 +94,34 @@ class BatchSamplerSimilarLength(Sampler):
 class DatasetHelper:
     def __init__(
         self,
-        tokenizer,
-        batch_size,
-        seq_len,
-        num_workers,
-        persistent_workers,
-        use_pin_memory,
-        split="train",
+        tokenizer: PreTrainedTokenizer,
+        batch_size: int,
+        seq_len: int,
+        num_workers: int,
+        persistent_workers: bool,
+        use_pin_memory: bool,
+        split: str = "train",
     ):
+        """
+        Construct a dataset loader within this class.
+
+        Args:
+            tokenizer (PreTrainedTokenizer): Tokenizer instance.
+            batch_size  (int): Batch size to be used to compute upper limit of
+                tokens.
+            seq_len (int): Sequence length to be used to compute upper limit of
+                tokens in a given batch. This will be directly correlated to
+                available GPU memory. This will also be taken as max_seq_len a
+                model can have.
+            num_workers (int): Number of workers for dataset loader.
+            persistent_workers (bool): Use persistent_worker in torch dataloader.
+            use_pin_memory (bool): Use pin_memory in torch dataloader.
+            split (str, optional): Dataset split. Either "train" or "validation".
+                Defaults to "train".
+
+        Raises:
+            RuntimeError: If unsupported split is provided.
+        """
         if split not in ["train", "validation"]:
             raise RuntimeError(
                 f"Split for dataloader shall be from 'train' or 'validation' only."
@@ -168,25 +190,39 @@ class DatasetHelper:
         return batched_input_ids, batched_attention_mask, batched_labels
 
     def get_loader(self):
+        """
+        Get instance of dataloader.
+
+        Returns:
+            DataLoader: Dataloader based on split.
+        """
         return self.dataloader
 
 
 if __name__ == "__main__":
+    from models.helper import train_config_factory
     from utils.misc import get_tokenizer
 
-    tokenizer = get_tokenizer("gpt")
-    helper = DatasetHelper(
-        tokenizer,
-        batch_size=2,
-        seq_len=128,
-        num_workers=2,
-        persistent_workers=4,
-        use_pin_memory=True,
-        split="validation",
-    )
-    data_loader = helper.get_loader()
+    model_type = "gpt"
+    train_config = train_config_factory(model_type)
+    tokenizer = get_tokenizer(model_type)
 
-    for data in data_loader:
-        for d in data:
-            print(d.shape, d.dtype)
+    valid_helper = DatasetHelper(
+        tokenizer,
+        train_config.batch_size,
+        train_config.max_seq_len,
+        train_config.num_workers,
+        train_config.persistent_workers,
+        train_config.use_pin_memory,
+        "validation",
+    )
+    valid_loader = valid_helper.get_loader()
+
+    for batch_idx, (input_ids, attn_mask, labels) in enumerate(valid_loader):
+        print(f"Input ids: {input_ids}")
+        print(f"Attention mask: {attn_mask}")
+        print(f"Labels: {labels}")
+        print(f"Input ids shape: {input_ids.shape}")
+        print(f"Attention mask shape: {attn_mask.shape}")
+        print(f"Labels shape: {labels.shape}")
         break

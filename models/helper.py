@@ -113,7 +113,7 @@ def model_config_factory(model_type: str) -> Config:
     if model_type == "gpt":
         from models.gpt_config import GPTConfig
 
-        return GPTConfig
+        return GPTConfig()
     else:
         raise NotImplementedError(
             f"No model config implemented for model type: {model_type}"

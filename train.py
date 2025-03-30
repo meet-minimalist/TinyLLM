@@ -10,7 +10,7 @@ import os
 
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 import torch
-import importlib
+from tqdm import tqdm
 import argparse
 
 from dataset_helper import DatasetHelper
@@ -19,14 +19,24 @@ from models.helper import (
     model_config_factory,
     model_factory,
 )
-from utils.misc import get_tokenizer, lr_scheduler_factory
+from utils.misc import get_tokenizer, lr_scheduler_factory, init_wandb
+from utils.checkpoint_handler import CheckpointHandler
+from utils.logger_utils import configure_logging, logger
 from torch.amp import GradScaler
 from utils.loss_helper import compute_ce_loss
 
 
 def run(args):
     train_config = train_config_factory(args.model_name)
+    exp_path = train_config.base_exp_path
+    configure_logging(train_config.log_file)
     model_config = model_config_factory(args.model_name)
+    assert (
+        model_config.max_seq_len == train_config.max_seq_len
+    ), "Model config and training config should have same value for max_seq_len."  # For Positional Embeddings.
+    assert not (
+        train_config.device == "cpu" and train_config.fp16_training
+    ), "FP16 Training is only available for CUDA devices."
     device = torch.device(train_config.device)
     model = model_factory(args.model_name, model_config)
     model.to(device)
@@ -55,6 +65,7 @@ def run(args):
     )
     valid_loader = valid_helper.get_loader()
 
+    ckpt_handler = CheckpointHandler(exp_path, "model", max_to_keep=3)
     lr_scheduler = lr_scheduler_factory(
         train_config.lr_scheduler_type,
         init_lr=train_config.init_lr,
@@ -68,6 +79,12 @@ def run(args):
 
     if train_config.fp16_training:
         scaler = GradScaler()
+    if train_config.use_wandb:
+        import wandb
+
+        init_wandb(train_config, model_config, train_config.resume_wandb_id)
+        if train_config.track_gradients:
+            wandb.watch(model)
 
     g_step = 0
     for eps_num in range(train_config.num_epochs):
@@ -75,20 +92,14 @@ def run(args):
         for batch_idx, (input_ids, attn_mask, labels) in enumerate(
             train_loader
         ):
-            input_ids = input_ids.to(device)
-            attn_mask = attn_mask.to(device)
-            labels = labels.to(device)
+            batch_size = input_ids.shape[0]
+            input_ids = input_ids.to(device, non_blocking=True)
+            attn_mask = attn_mask.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
 
             if train_config.fp16_training:
                 # Runs the forward pass with autocasting.
-                with torch.autocast(
-                    device_type="cuda" if torch.cuda.is_available() else "cpu",
-                    dtype=(
-                        torch.float16
-                        if torch.cuda.is_available()
-                        else torch.float32
-                    ),
-                ):
+                with torch.autocast(device_type="cuda", dtype=torch.float16):
                     logits = model(input_ids, attn_mask)
                     loss = compute_ce_loss(
                         logits,
@@ -96,6 +107,7 @@ def run(args):
                         train_config.label_smoothing,
                         tokenizer.pad_token_id,
                     )
+                    ppl = torch.exp(loss)
                     loss = loss / train_config.iters_to_accumulate
                 scaler.scale(loss).backward()
             else:
@@ -106,6 +118,7 @@ def run(args):
                     train_config.label_smoothing,
                     tokenizer.pad_token_id,
                 )
+                ppl = torch.exp(loss)
 
             lr = lr_scheduler.step(g_step, optimizer)
 
@@ -130,32 +143,87 @@ def run(args):
                     optimizer.step()
                 optimizer.zero_grad()
 
+            logger.info(
+                f"Epoch: {eps_num+1}/{train_config.num_epochs}, Batch: {batch_idx}/{len(train_loader)}, "
+                f"Batch Size: {batch_size}, Loss: {loss:.4f}, "
+                f"PPL: {ppl:.4f}, LR: {lr:.4f}"
+            )
+            metrics = {
+                "Epoch": eps_num + 1,
+                "Batch": batch_idx + 1,
+                "Loss": loss,
+                "Perplexity": ppl,
+                "LR": lr,
+            }
+            if train_config.use_wandb:
+                wandb.log(metrics, step=g_step)
+
+            g_step += 1
             print(
                 f"Epoch: {eps_num+1}/{train_config.num_epochs}, Batch: {batch_idx}/{len(train_loader)}, Loss: {loss:.4f}, LR: {lr:.4f}"
             )
 
-        # model.eval()
-        # total_eval_loss = 0
-        # for batch in eval_dataloader:
-        #     with torch.no_grad():
-        #         input_ids = batch['input_ids']
-        #         attention_mask = batch['attention_mask']
-        #         labels = batch['labels']
-        #         outputs = model(input_ids, attention_mask=attention_mask, labels=labels)
-        #         loss = outputs.loss
-        #         total_eval_loss += loss.item()
+        model.eval()
+        total_eval_loss = 0
+        total_eval_ppl = 0
+        with torch.no_grad():
+            for input_ids, attn_mask, labels in tqdm(valid_loader):
+                input_ids = input_ids.to(device, non_blocking=True)
+                attn_mask = attn_mask.to(device, non_blocking=True)
+                labels = labels.to(device, non_blocking=True)
 
-        # avg_eval_loss = total_eval_loss / len(eval_dataloader)
-        # print(f"Epoch {epoch+1}, Evaluation Loss: {avg_eval_loss}")
+                logits = model(input_ids, attn_mask)
 
-    # Save the model
-    # model.save_pretrained("path/to/save/model")
-    # tokenizer.save_pretrained("path/to/save/tokenizer")
+                batch_size = logits.shape[0]
+                logits = logits.view(-1, logits.shape[2])
+                labels = labels.view(-1)
+
+                # We would take mean across all sequence length and all batches.
+                loss = compute_ce_loss(
+                    logits,
+                    labels,
+                    0,
+                    tokenizer.pad_token_id,
+                )
+                ppl = torch.exp(loss)
+                total_eval_loss += loss.item()
+                total_eval_ppl += ppl.item()
+
+        avg_eval_loss = total_eval_loss / len(valid_loader)
+        avg_eval_ppl = total_eval_ppl / len(valid_loader)
+        logger.info(
+            f"Epoch {eps_num+1}, Evaluation Loss: {avg_eval_loss:.4f}, "
+            f"Evaluation Perplexity: {avg_eval_ppl:.4f}"
+        )
+
+        if train_config.use_wandb:
+            metrics = {"Test Loss": loss}
+            wandb.log(metrics, step=g_step)
+
+        # Save the model
+        torch.save(model.state_dict(), "model.pth")
+
+        checkpoint = {
+            "epoch": eps_num,
+            "global_step": g_step,
+            "test_loss": avg_eval_loss,
+            "test_ppl": avg_eval_ppl,
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "scaler": (
+                scaler.state_dict() if train_config.fp16_training else None
+            ),
+        }
+        ckpt_handler.save(checkpoint)
+
+    if train_config.use_wandb:
+        wandb.finish()
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="TinyLLM Training helper.")
     parser.add_argument(
+        "-m",
         "--model_name",
         type=str,
         required=True,

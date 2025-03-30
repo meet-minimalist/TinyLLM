@@ -25,11 +25,11 @@ from utils.loss_helper import compute_ce_loss
 
 
 def run(args):
-    cuda = torch.device("cuda")
     train_config = train_config_factory(args.model_name)
     model_config = model_config_factory(args.model_name)
+    device = torch.device(train_config.device)
     model = model_factory(args.model_name, model_config)
-    model.to(cuda)
+    model.to(device)
     # model = torch.compile(model)
 
     tokenizer = get_tokenizer(train_config.model_type)
@@ -74,13 +74,20 @@ def run(args):
         for batch_idx, (input_ids, attn_mask, labels) in enumerate(
             train_loader
         ):
-            input_ids = input_ids.to(cuda)
-            attn_mask = attn_mask.to(cuda)
-            labels = labels.to(cuda)
+            input_ids = input_ids.to(device)
+            attn_mask = attn_mask.to(device)
+            labels = labels.to(device)
 
             if train_config.fp16_training:
                 # Runs the forward pass with autocasting.
-                with torch.autocast(device_type="cuda", dtype=torch.float16):
+                with torch.autocast(
+                    device_type="cuda" if torch.cuda.is_available() else "cpu",
+                    dtype=(
+                        torch.float16
+                        if torch.cuda.is_available()
+                        else torch.float32
+                    ),
+                ):
                     logits = model(input_ids, attn_mask)
                     loss = compute_ce_loss(
                         logits,
@@ -106,17 +113,17 @@ def run(args):
                     (batch_idx + 1) % train_config.iters_to_accumulate == 0
                 ) or (batch_idx + 1 == len(train_loader)):
                     if train_config.fp16_training:
-                        scaler.step()
+                        scaler.step(optimizer)
                         scaler.update()
                     else:
                         optimizer.step()
                     optimizer.zero_grad()
                 else:
                     # Dont zero the gradients. We need to accumulate them.
-                    continue
+                    pass
             else:
                 if train_config.fp16_training:
-                    scaler.step()
+                    scaler.step(optimizer)
                     scaler.update()
                 else:
                     optimizer.step()

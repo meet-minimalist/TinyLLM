@@ -66,7 +66,9 @@ class GPTModel(nn.Module):
         mask = torch.where(mask == 0, 0, self.MAX_NEG)
         return mask  # [batch, 1, 1, seq]
 
-    def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, input_ids: torch.Tensor, mask: torch.Tensor
+    ) -> torch.Tensor:
         """
         Forward function for GPT model.
 
@@ -77,7 +79,7 @@ class GPTModel(nn.Module):
         Returns:
             torch.Tensor: Output of GPT model of shape [batch, seq, vocab_size].
         """
-        x = self.emb_layer(x)  # [batch, seq, emb_dim]
+        x = self.emb_layer(input_ids)  # [batch, seq, emb_dim]
         x = self.pos_emb_layer(x)  # [batch, seq, emb_dim]
         mask = self.update_mask(mask)  # [batch, 1, 1, seq]
         for transformer_block in self.transformer_blocks:

@@ -22,6 +22,7 @@ class GPTTrainConfig(Config):
     max_seq_len = 1024
     num_workers = 4
     persistent_workers = True
+    use_pin_memory = True
 
     lr_scheduler_type = "cosine"
     init_lr = 1e-3
@@ -33,6 +34,8 @@ class GPTTrainConfig(Config):
     resume_wandb_id = None
     track_gradients = False
     fp16_training = True
+    use_grad_accum = True
+    iters_to_accumulate = 4
 
     def __init__(self):
         super().__init__(True)

@@ -97,25 +97,32 @@ class DatasetHelper:
         seq_len,
         num_workers,
         persistent_workers,
+        use_pin_memory,
         split="train",
     ):
         if split not in ["train", "validation"]:
             raise RuntimeError(
                 f"Split for dataloader shall be from 'train' or 'validation' only."
             )
-        data_loader = load_dataset("roneneldan/TinyStories", split=split)
+        dataset = load_dataset("roneneldan/TinyStories", split=split)
 
         self.tokenizer = tokenizer
-        self.pad_token_id = tokenizer.convert_tokens_to_ids(tokenizer.pad_token)
+        self.pad_token_id = torch.tensor(
+            [tokenizer.convert_tokens_to_ids(tokenizer.pad_token)]
+        )
+        self.bos_token_id = torch.tensor([tokenizer.bos_token_id])
+        self.eos_token_id = torch.tensor([tokenizer.eos_token_id])
+
         batch_sampler = BatchSamplerSimilarLength(
-            data_loader, batch_size, seq_len, shuffle=True
+            dataset, batch_size, seq_len, shuffle=True
         )
         self.dataloader = DataLoader(
-            data_loader,
+            dataset,
             batch_sampler=batch_sampler,
             collate_fn=self.collate_batch,
             num_workers=num_workers,
             persistent_workers=persistent_workers,
+            pin_memory=use_pin_memory,
         )
 
     def collate_batch(self, batch_data: List) -> Tuple[torch.Tensor]:
@@ -126,38 +133,56 @@ class DatasetHelper:
 
         Returns:
             Tuple[torch.Tensor]: Tuple of source token, target token, source
-                mask, target mask and target labels.
+                mask, target mask and target labels. All have shape of [batch, seq]
         """
-        input_ids, attention_mask, labels = [], [], []
+        batched_input_ids, batched_attention_mask, batched_labels = [], [], []
 
         for data in batch_data:
             text = data["text"]
-            tokenized_data = self.tokenizer(text)
-            input_ids.append(
-                torch.tensor(tokenized_data["input_ids"], dtype=torch.int32)
+            input_ids = self.tokenizer.encode(text, return_tensors="pt")[0]
+            input_ids = torch.cat(
+                [self.bos_token_id, input_ids, self.eos_token_id], dim=0
             )
-            labels.append(
-                torch.tensor(
-                    tokenized_data["input_ids"][1:] + [self.pad_token_id],
-                    dtype=torch.int32,
-                )
-            )
-            attention_mask.append(
-                torch.tensor(
-                    tokenized_data["attention_mask"], dtype=torch.int32
-                )
-            )
-        input_ids = pad_sequence(
-            input_ids, batch_first=True, padding_value=self.pad_token_id
-        )
-        attention_mask = pad_sequence(
-            attention_mask, batch_first=True, padding_value=0
-        )
-        labels = pad_sequence(
-            labels, batch_first=True, padding_value=self.pad_token_id
-        )
-        labels = labels.to(torch.long)
-        return input_ids, attention_mask, labels
+            labels = torch.cat([input_ids[1:], self.pad_token_id], dim=0)
+            attn_mask = torch.ones_like(input_ids)
+            batched_input_ids.append(input_ids)
+            batched_labels.append(labels)
+            batched_attention_mask.append(attn_mask)
+        batched_input_ids = pad_sequence(
+            batched_input_ids,
+            batch_first=True,
+            padding_value=self.pad_token_id.item(),
+        ).to(torch.int32)
+        batched_attention_mask = pad_sequence(
+            batched_attention_mask, batch_first=True, padding_value=0
+        ).to(torch.int32)
+        batched_labels = pad_sequence(
+            batched_labels,
+            batch_first=True,
+            padding_value=self.pad_token_id.item(),
+        ).to(torch.int64)
+        return batched_input_ids, batched_attention_mask, batched_labels
 
     def get_loader(self):
         return self.dataloader
+
+
+if __name__ == "__main__":
+    from utils.misc import get_tokenizer
+
+    tokenizer = get_tokenizer("gpt")
+    helper = DatasetHelper(
+        tokenizer,
+        batch_size=2,
+        seq_len=128,
+        num_workers=2,
+        persistent_workers=4,
+        use_pin_memory=True,
+        split="validation",
+    )
+    data_loader = helper.get_loader()
+
+    for data in data_loader:
+        for d in data:
+            print(d.shape, d.dtype)
+        break

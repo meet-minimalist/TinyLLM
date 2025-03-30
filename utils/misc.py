@@ -35,6 +35,13 @@ def get_tokenizer(model_type: str) -> PreTrainedTokenizer:
         from transformers import GPT2Tokenizer
 
         tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+        tokenizer.add_special_tokens(
+            {
+                "bos_token": "<s>",
+                "eos_token": "</s>",
+                "unk_token": "<unk>",
+            }
+        )
         tokenizer.pad_token = tokenizer.eos_token
         return tokenizer
     else:

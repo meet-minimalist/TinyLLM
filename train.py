@@ -10,20 +10,27 @@ import os
 
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 import torch
-import train_config
-from torch.nn import CrossEntropyLoss
+import importlib
+import argparse
 
 from dataset_helper import DatasetHelper
-from models.helper import config_factory, model_factory
+from models.helper import (
+    train_config_factory,
+    model_config_factory,
+    model_factory,
+)
 from utils.misc import get_tokenizer, lr_scheduler_factory
+from torch.amp import GradScaler
+from utils.loss_helper import compute_ce_loss
 
 
-def run():
+def run(args):
     cuda = torch.device("cuda")
-
-    model_config = config_factory(train_config.model_type)
-    model = model_factory(train_config.model_type, model_config)
+    train_config = train_config_factory(args.model_name)
+    model_config = model_config_factory(args.model_name)
+    model = model_factory(args.model_name, model_config)
     model.to(cuda)
+    # model = torch.compile(model)
 
     tokenizer = get_tokenizer(train_config.model_type)
 
@@ -33,6 +40,7 @@ def run():
         train_config.avg_seq_len_in_batch,
         train_config.num_workers,
         train_config.persistent_workers,
+        train_config.use_pin_memory,
         "validation",
     )
     train_loader = train_helper.get_loader()
@@ -42,6 +50,7 @@ def run():
         train_config.avg_seq_len_in_batch,
         train_config.num_workers,
         train_config.persistent_workers,
+        train_config.use_pin_memory,
         "validation",
     )
     valid_loader = valid_helper.get_loader()
@@ -53,36 +62,65 @@ def run():
         warmup_epochs=train_config.warmup_epochs,
         steps_per_epoch=len(train_loader),
     )
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.0, weight_decay=0.1)
-    loss_fn = CrossEntropyLoss(
-        reduction="mean",
-        label_smoothing=train_config.label_smoothing,
-        ignore_index=tokenizer.convert_tokens_to_ids(tokenizer.pad_token),
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=0.0, weight_decay=0.1, fused=True
     )
 
+    if train_config.fp16_training:
+        scaler = GradScaler()
     g_step = 0
     for eps_num in range(train_config.num_epochs):
         model.train()
         for batch_idx, (input_ids, attn_mask, labels) in enumerate(
             train_loader
         ):
-            optimizer.zero_grad()
             input_ids = input_ids.to(cuda)
             attn_mask = attn_mask.to(cuda)
             labels = labels.to(cuda)
 
-            logits = model(input_ids, attn_mask)
-
-            batch_size = logits.shape[0]
-            logits = logits.view(-1, logits.shape[2])
-            labels = labels.view(-1).to(torch.long)
-
-            # We would take mean across all sequence length and all batches.
-            loss = loss_fn(logits, labels) * batch_size
-            loss.backward()
+            if train_config.fp16_training:
+                # Runs the forward pass with autocasting.
+                with torch.autocast(device_type="cuda", dtype=torch.float16):
+                    logits = model(input_ids, attn_mask)
+                    loss = compute_ce_loss(
+                        logits,
+                        labels,
+                        train_config.label_smoothing,
+                        tokenizer.pad_token_id,
+                    )
+                    loss = loss / train_config.iters_to_accumulate
+                scaler.scale(loss).backward()
+            else:
+                logits = model(input_ids, attn_mask)
+                loss = compute_ce_loss(
+                    logits,
+                    labels,
+                    train_config.label_smoothing,
+                    tokenizer.pad_token_id,
+                )
 
             lr = lr_scheduler.step(g_step, optimizer)
-            optimizer.step()
+
+            if train_config.use_grad_accum:
+                if (
+                    (batch_idx + 1) % train_config.iters_to_accumulate == 0
+                ) or (batch_idx + 1 == len(train_loader)):
+                    if train_config.fp16_training:
+                        scaler.step()
+                        scaler.update()
+                    else:
+                        optimizer.step()
+                    optimizer.zero_grad()
+                else:
+                    # Dont zero the gradients. We need to accumulate them.
+                    continue
+            else:
+                if train_config.fp16_training:
+                    scaler.step()
+                    scaler.update()
+                else:
+                    optimizer.step()
+                optimizer.zero_grad()
 
             print(
                 f"Epoch: {eps_num+1}/{train_config.num_epochs}, Batch: {batch_idx}/{len(train_loader)}, Loss: {loss:.4f}, LR: {lr:.4f}"
@@ -108,4 +146,12 @@ def run():
 
 
 if __name__ == "__main__":
-    run()
+    parser = argparse.ArgumentParser(description="TinyLLM Training helper.")
+    parser.add_argument(
+        "--model_name",
+        type=str,
+        required=True,
+        help="Name of the model to train.",
+    )
+    args = parser.parse_args()
+    run(args)

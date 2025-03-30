@@ -111,7 +111,7 @@ def model_config_factory(model_type: str) -> Config:
         Config: Config class return for given model_type.
     """
     if model_type == "gpt":
-        from models.gpt_model_config import GPTConfig
+        from models.gpt_config import GPTConfig
 
         return GPTConfig
     else:

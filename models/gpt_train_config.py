@@ -18,7 +18,7 @@ class GPTTrainConfig(Config):
     exp_path = "gpt_training"
 
     sample_similar_len = False
-    num_epochs = 10
+    num_epochs = 1
     batch_size = 4
     max_seq_len = 1024
     num_workers = 4
@@ -27,7 +27,7 @@ class GPTTrainConfig(Config):
 
     lr_scheduler_type = "cosine"
     init_lr = 1e-3
-    warmup_epochs = 2
+    warmup_epochs = 0
     label_smoothing = 0.1
     device = "cuda:0"
 

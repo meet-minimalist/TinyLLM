@@ -32,17 +32,38 @@ class CheckpointHandler:
         self.max_to_keep = max_to_keep
         self.ckpt_path_history = []
 
-    def __get_ckpt_path(self, eps: int, loss: float) -> str:
+    def __get_ckpt_path(
+        self,
+        global_step: int,
+        eps: int,
+        last_train_loss: float,
+        last_train_ppl: float,
+        test_loss: float,
+    ) -> str:
         """Function to get the checkpoint path based on given epoch and loss value.
 
         Args:
+            global_step (int): Global training step.
             eps (int): Epoch number.
-            loss (float): Loss value.
+            last_train_loss (float): Training loss of most recent batch.
+            last_train_ppl (float): Training PPL of most recent batch.
+            test_loss (float): Test loss value evaluated the end of epoch.
 
         Returns:
             str: Checkpoint path.
         """
-        ckpt_name = f"{self.model_name}_eps_{eps}_test_loss_{loss:.4f}.pt"
+        if eps is not None and test_loss is not None:
+            ckpt_name = (
+                f"{self.model_name}_eps_{eps}_test_loss_{test_loss:.4f}.pt"
+            )
+        elif (
+            global_step is not None
+            and last_train_loss is not None
+            and last_train_ppl is not None
+        ):
+            ckpt_name = f"{self.model_name}_step_{global_step}_train_loss_{last_train_loss:.4f}_train_ppl_{last_train_ppl:.4f}.pt"
+        else:
+            ckpt_name = f"{self.model_name}.pt"
         cur_ckpt_path = os.path.join(self.ckpt_dir, ckpt_name)
         return cur_ckpt_path
 
@@ -54,10 +75,15 @@ class CheckpointHandler:
             checkpoint_state (Dict): Checkpoint dict which contains epoch_num,
                 test_loss value, checkpoint statedict.
         """
-        eps = checkpoint_state["epoch"]
-        test_loss = checkpoint_state["test_loss"]
+        eps = checkpoint_state.get("epoch", None)
+        test_loss = checkpoint_state.get("test_loss", None)
+        global_step = checkpoint_state.get("global_step", None)
+        last_train_loss = checkpoint_state.get("last_train_loss", None)
+        last_train_ppl = checkpoint_state.get("last_train_ppl", None)
 
-        cur_ckpt_path = self.__get_ckpt_path(eps, test_loss)
+        cur_ckpt_path = self.__get_ckpt_path(
+            global_step, eps, last_train_loss, last_train_ppl, test_loss
+        )
 
         torch.save(checkpoint_state, cur_ckpt_path)
 

@@ -160,6 +160,22 @@ def run(args):
             if train_config.use_wandb:
                 wandb.log(metrics, step=g_step)
 
+            if (g_step + 1) % 1000 == 0:
+                # Save checkpoint at every 1000 steps.
+                checkpoint = {
+                    "global_step": g_step,
+                    "last_train_loss": loss,
+                    "last_train_ppl": ppl,
+                    "model": model.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "scaler": (
+                        scaler.state_dict()
+                        if train_config.fp16_training
+                        else None
+                    ),
+                }
+                ckpt_handler.save(checkpoint)
+
             g_step += 1
 
         model.eval()

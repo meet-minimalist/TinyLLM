@@ -51,7 +51,8 @@ def run(args):
         train_config.num_workers,
         train_config.persistent_workers,
         train_config.use_pin_memory,
-        "validation",
+        train_config.sample_similar_len,
+        "train",
     )
     train_loader = train_helper.get_loader()
     valid_helper = DatasetHelper(
@@ -61,6 +62,7 @@ def run(args):
         train_config.num_workers,
         train_config.persistent_workers,
         train_config.use_pin_memory,
+        train_config.sample_similar_len,
         "validation",
     )
     valid_loader = valid_helper.get_loader()

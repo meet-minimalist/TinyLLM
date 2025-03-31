@@ -17,6 +17,7 @@ class GPTTrainConfig(Config):
     model_type = "gpt"
     exp_path = "gpt_training"
 
+    sample_similar_len = False
     num_epochs = 10
     batch_size = 4
     max_seq_len = 1024

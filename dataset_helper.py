@@ -100,6 +100,7 @@ class DatasetHelper:
         num_workers: int,
         persistent_workers: bool,
         use_pin_memory: bool,
+        sample_similar_len: bool,
         split: str = "train",
     ):
         """
@@ -116,6 +117,8 @@ class DatasetHelper:
             num_workers (int): Number of workers for dataset loader.
             persistent_workers (bool): Use persistent_worker in torch dataloader.
             use_pin_memory (bool): Use pin_memory in torch dataloader.
+            sample_similar_len (bool): Enabling sampling of similar length
+                sequences in same batch.
             split (str, optional): Dataset split. Either "train" or "validation".
                 Defaults to "train".
 
@@ -134,17 +137,28 @@ class DatasetHelper:
         self.eos_token_id = torch.tensor([tokenizer.eos_token_id])
 
         self.max_len = seq_len
-        batch_sampler = BatchSamplerSimilarLength(
-            dataset, batch_size, seq_len, shuffle=True
-        )
-        self.dataloader = DataLoader(
-            dataset,
-            batch_sampler=batch_sampler,
-            collate_fn=self.collate_batch,
-            num_workers=num_workers,
-            persistent_workers=persistent_workers,
-            pin_memory=use_pin_memory,
-        )
+        if sample_similar_len:
+            batch_sampler = BatchSamplerSimilarLength(
+                dataset, batch_size, seq_len, shuffle=True
+            )
+            self.dataloader = DataLoader(
+                dataset,
+                batch_sampler=batch_sampler,
+                collate_fn=self.collate_batch,
+                num_workers=num_workers,
+                persistent_workers=persistent_workers,
+                pin_memory=use_pin_memory,
+            )
+        else:
+            self.dataloader = DataLoader(
+                dataset,
+                batch_size=batch_size,
+                shuffle=True,
+                collate_fn=self.collate_batch,
+                num_workers=num_workers,
+                persistent_workers=persistent_workers,
+                pin_memory=use_pin_memory,
+            )
 
     def collate_batch(self, batch_data: List) -> Tuple[torch.Tensor]:
         """Function to tokenize sequences and prepare the mask for training.
@@ -226,4 +240,7 @@ if __name__ == "__main__":
         print(f"Input ids shape: {input_ids.shape}")
         print(f"Attention mask shape: {attn_mask.shape}")
         print(f"Labels shape: {labels.shape}")
+        import pdb
+
+        pdb.set_trace()
         break

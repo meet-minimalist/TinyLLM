@@ -35,6 +35,4 @@ def compute_ce_loss(
         ignore_index=ignore_index,
     )
 
-    # Multiply it with batch size to get the loss for entire batch.
-    loss = loss * batch_size
     return loss

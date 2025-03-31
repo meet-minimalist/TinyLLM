@@ -163,7 +163,8 @@ class DatasetHelper:
             input_ids = self.tokenizer.encode(
                 text,
                 return_tensors="pt",
-                max_length=self.max_len,
+                max_length=self.max_len
+                - 2,  # minus 2 because we will be adding bos and eos tokens as well.
                 truncation=True,
             )[0]
             input_ids = torch.cat(

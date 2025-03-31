@@ -159,9 +159,6 @@ def run(args):
                 wandb.log(metrics, step=g_step)
 
             g_step += 1
-            print(
-                f"Epoch: {eps_num+1}/{train_config.num_epochs}, Batch: {batch_idx}/{len(train_loader)}, Loss: {loss:.4f}, LR: {lr:.4f}"
-            )
 
         model.eval()
         total_eval_loss = 0
@@ -173,10 +170,6 @@ def run(args):
                 labels = labels.to(device, non_blocking=True)
 
                 logits = model(input_ids, attn_mask)
-
-                batch_size = logits.shape[0]
-                logits = logits.view(-1, logits.shape[2])
-                labels = labels.view(-1)
 
                 # We would take mean across all sequence length and all batches.
                 loss = compute_ce_loss(

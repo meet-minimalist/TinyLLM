@@ -18,10 +18,13 @@ from utils.logger_utils import logger
 
 
 class Config(ABC):
-    def __init__(self, init_exp=False):
+    def __init__(self, init_exp=False, exp_path=None):
         if init_exp:
             exp_time = datetime.now().strftime("%Y-%m-%d-%H-%M")
-            self.base_exp_path = f"./exp/{exp_time}"
+            if exp_path is None:
+                self.base_exp_path = f"./exp/{exp_time}"
+            else:
+                self.base_exp_path = os.path.join(exp_path, exp_time)
             os.makedirs(self.base_exp_path, exist_ok=True)
             self.log_file = os.path.join(self.base_exp_path, "log.txt")
 

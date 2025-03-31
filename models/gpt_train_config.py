@@ -15,6 +15,7 @@ class GPTTrainConfig(Config):
     """
 
     model_type = "gpt"
+    exp_path = "gpt_training"
 
     num_epochs = 10
     batch_size = 4
@@ -37,7 +38,7 @@ class GPTTrainConfig(Config):
     iters_to_accumulate = 4
 
     def __init__(self):
-        super().__init__(True)
+        super().__init__(True, GPTTrainConfig.exp_path)
 
 
 if __name__ == "__main__":

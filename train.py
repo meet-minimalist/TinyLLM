@@ -109,9 +109,10 @@ def run(args):
                         train_config.label_smoothing,
                         tokenizer.pad_token_id,
                     )
-                    ppl = torch.exp(loss)
                     loss = loss / train_config.iters_to_accumulate
-                scaler.scale(loss).backward()
+                loss = scaler.scale(loss)
+                loss.backward()
+                ppl = torch.exp(loss)
             else:
                 logits = model(input_ids, attn_mask)
                 loss = compute_ce_loss(

@@ -8,7 +8,6 @@
 
 import os
 
-os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 import torch
 from tqdm import tqdm
 import argparse
@@ -24,6 +23,7 @@ from utils.checkpoint_handler import CheckpointHandler
 from utils.logger_utils import configure_logging, logger
 from torch.amp import GradScaler
 from utils.loss_helper import compute_ce_loss
+from torchinfo import summary
 
 
 def run(args):
@@ -41,6 +41,14 @@ def run(args):
     model = model_factory(args.model_name, model_config)
     model.to(device)
     model = torch.compile(model)
+
+    input_ids = torch.zeros(2, 128).to(torch.int32).to(device)
+    attn_mask = torch.zeros(2, 128).to(torch.int32).to(device)
+    summary(model, input_data=[input_ids, attn_mask])
+    model_param_count = sum([torch.numel(p) for p in model.parameters()])
+    print(
+        f"Training {train_config.model_type} model with {model_param_count:,} params."
+    )
 
     tokenizer = get_tokenizer(train_config.model_type)
 

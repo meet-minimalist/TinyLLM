@@ -8,9 +8,9 @@
 
 import os
 
-os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 import torch
 import argparse
+import time
 
 from models.helper import (
     model_config_factory,
@@ -30,7 +30,9 @@ def run(args):
     if not os.path.isfile(args.checkpoint):
         raise FileNotFoundError("Checkpoint not found.")
 
-    model.load_state_dict(torch.load(args.checkpoint)["model"].state_dict())
+    model.load_state_dict(
+        torch.load(args.checkpoint, weights_only=False)["model"]
+    )
 
     tokenizer = get_tokenizer(args.model_name)
 
@@ -38,12 +40,15 @@ def run(args):
 
     predicted_string = ""
     cnt = 0
+    start = time.time()
     while True:
         if cnt >= args.max_tokens:
             print("Max tokens reached.")
             break
         input_data = tokenizer.tokenize(input_string)
-        logits = model(**input_data)
+        input_ids = input_data["input_ids"].to(device)
+        mask = input_data["attention_mask"].to(device)
+        logits = model(input_ids, mask)
         token = torch.argmax(logits[:, -1, :])
         if token == tokenizer.eos_token_id:
             print("EOS reached.")
@@ -51,7 +56,10 @@ def run(args):
         token_char = tokenizer.decode(token)
         predicted_string += token_char
         input_string += token_char
+        cnt += 1
+    delta = time.time() - start
 
+    print(f"Total time: {delta} sec")
     print(f"Input Prompt: {args.prompt}")
     print(f"Generated output: {predicted_string}")
 
@@ -83,7 +91,7 @@ if __name__ == "__main__":
         "-p",
         "--prompt",
         type=str,
-        default="Once upon a time in, ",
+        default="Once upon a time in,",
         help="Initial prompt to be provided to the model to start the generation process.",
     )
     parser.add_argument(

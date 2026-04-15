@@ -5,3 +5,5 @@ __pycache__/
 *.pyd
 exp/
 wandb/
+tinyllm_env/
+gpt_training/

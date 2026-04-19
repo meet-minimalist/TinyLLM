@@ -55,12 +55,14 @@ class Trainer:
         # Move model to device
         self.model.to(self.device)
 
-        # Compile
-        self.model = torch.compile(
-            self.model,
-            mode="max-autotune",  # best performance
-            fullgraph=False,  # safer default
-        )
+        # Compile model for higher throughput (PyTorch 2.x)
+        use_compile = getattr(train_config, "use_compile", True)
+        if use_compile and self.device.type == "cuda":
+            self.model = torch.compile(
+                self.model,
+                mode="reduce-overhead",  # best for small models / batch sizes
+            )
+            logger.info("Model compiled with torch.compile (reduce-overhead)")
 
         self._log_model_summary()
 
@@ -139,7 +141,7 @@ class Trainer:
             )
 
     def _step_train(
-        self, input_ids, attn_mask, labels, batch_idx, total_batches, should_log
+        self, input_ids, attn_mask, labels, batch_idx, total_batches
     ) -> tuple[float, float]:
         input_ids = input_ids.to(self.device, non_blocking=True)
         attn_mask = attn_mask.to(self.device, non_blocking=True)

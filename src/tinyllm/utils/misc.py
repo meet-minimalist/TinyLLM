@@ -24,9 +24,9 @@ from typing import Any, Dict
 from src.tinyllm.logger.logger_utils import logger
 
 
-def get_tokenizer(model_name: str):
+def get_tokenizer(tokenizer_name: str):
     """
-    Get the tokenizer based on the model_name.
+    Get the tokenizer based on the tokenizer_name.
 
     This function tries to use `transformers`' tokenizer when available.
     When `transformers` is not installed (e.g., in light-weight CI), it falls
@@ -35,7 +35,7 @@ def get_tokenizer(model_name: str):
     """
     from transformers import AutoTokenizer
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, use_fast=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     return tokenizer

@@ -6,6 +6,8 @@ Usage:
 """
 
 import argparse
+import os
+
 import torch
 
 from src.tinyllm.datasets.dataset_helper import DatasetHelper
@@ -38,7 +40,12 @@ def run(args):
     model = model_factory(model_config)
     tokenizer = get_tokenizer(model_config.tokenizer_name)
 
-    # Build data loaders
+    # Cache directory for pre-tokenized data (avoids re-tokenizing each run)
+    cache_dir = os.path.join(exp_path, "token_cache")
+    os.makedirs(cache_dir, exist_ok=True)
+
+    # Build data loaders — tokenize_upfront=True eliminates per-batch
+    # tokenizer overhead, which is the #1 cause of low GPU utilization.
     train_loader = DatasetHelper(
         tokenizer=tokenizer,
         batch_size=train_config.batch_size,
@@ -49,7 +56,9 @@ def run(args):
         sample_similar_len=train_config.sample_similar_len,
         split="train",
         dataset_name=train_config.dataset_name,
-        prefetch_factor=train_config.get("prefetch_factor", 2),
+        prefetch_factor=train_config.get("prefetch_factor", 4),
+        tokenize_upfront=True,
+        cache_dir=cache_dir,
     ).get_loader()
 
     test_loader = DatasetHelper(
@@ -62,7 +71,9 @@ def run(args):
         sample_similar_len=train_config.sample_similar_len,
         split="validation",
         dataset_name=train_config.dataset_name,
-        prefetch_factor=train_config.get("prefetch_factor", 2),
+        prefetch_factor=train_config.get("prefetch_factor", 4),
+        tokenize_upfront=True,
+        cache_dir=cache_dir,
     ).get_loader()
 
     # Optimizer

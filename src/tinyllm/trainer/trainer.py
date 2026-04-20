@@ -8,6 +8,7 @@ from torchinfo import summary
 from src.tinyllm.callbacks.callback_handler import CallbackHandler
 from src.tinyllm.logger.logger_utils import logger
 from src.tinyllm.loss_fn.loss_helper import compute_ce_loss
+from src.tinyllm.utils.train_utils import get_autocast_ctx
 
 
 class Trainer:
@@ -68,18 +69,12 @@ class Trainer:
 
     def _log_model_summary(self):
         input_ids = torch.zeros(
-            2,
+            1,
             self.train_config.max_seq_len,
             dtype=torch.int32,
             device=self.device,
         )
-        attn_mask = torch.zeros(
-            2,
-            self.train_config.max_seq_len,
-            dtype=torch.int32,
-            device=self.device,
-        )
-        summary(self.model, input_data=[input_ids, attn_mask], verbose=0)
+        summary(self.model, input_data=[input_ids], verbose=0)
         n_params = sum(p.numel() for p in self.model.parameters())
         logger.info(
             f"Training {self.train_config.model_type} model with {n_params:,} params."
@@ -133,46 +128,32 @@ class Trainer:
     def _epoch_train(self) -> tuple[float, float]:
         self.model.train()
 
-        for batch_idx, (input_ids, attn_mask, labels) in enumerate(
-            self.train_loader
-        ):
-            self._step_train(
-                input_ids, attn_mask, labels, batch_idx, len(self.train_loader)
-            )
+        for batch_idx, batched_input in enumerate(self.train_loader):
+            self._step_train(batched_input, batch_idx, len(self.train_loader))
 
     def _step_train(
-        self, input_ids, attn_mask, labels, batch_idx, total_batches
+        self, batched_input, batch_idx, total_batches
     ) -> tuple[float, float]:
-        input_ids = input_ids.to(self.device, non_blocking=True)
-        attn_mask = attn_mask.to(self.device, non_blocking=True)
-        labels = labels.to(self.device, non_blocking=True)
+        inputs, targets, cu_seq_len = batched_input
 
         self.callback_handler.on_train_step_begin(
             global_step=self.global_step, batch_idx=batch_idx
         )
 
         # Forward pass
-        if self.use_amp:
-            with torch.autocast(
-                device_type=self.device.type, dtype=torch.float16
-            ):
-                logits = self.model(input_ids, attn_mask)
-                loss = compute_ce_loss(
-                    logits,
-                    labels,
-                    self.train_config.get("label_smoothing", 0.0),
-                    self.tokenizer.pad_token_id,
-                )
-                loss = loss / self.iters_to_accumulate
-            self.scaler.scale(loss).backward()
-        else:
-            logits = self.model(input_ids, attn_mask)
+        autocast_ctx = get_autocast_ctx(self.device, self.use_amp)
+        with autocast_ctx:
+            logits = self.model(inputs, targets, cu_seq_len)
             loss = compute_ce_loss(
                 logits,
-                labels,
+                targets,
                 self.train_config.get("label_smoothing", 0.0),
                 self.tokenizer.pad_token_id,
             )
+            loss = loss / self.iters_to_accumulate
+        if self.use_amp:
+            self.scaler.scale(loss).backward()
+        else:
             loss.backward()
 
         # Gradient accumulation + optimizer step
@@ -202,7 +183,8 @@ class Trainer:
 
             logger.info(
                 f"Epoch step: {batch_idx + 1}/{total_batches}, "
-                f"Loss: {loss_value:.4f}, PPL: {ppl:.4f}, LR: {lr:.6f}"
+                f"Loss: {loss_value:.4f}, PPL: {ppl:.4f}, LR: {lr:.6f}, "
+                f"Tokens seen: {inputs.shape[0] * (batch_idx + 1)}"
             )
 
             self.callback_handler.on_train_step_end(
@@ -211,6 +193,7 @@ class Trainer:
                     "train_loss": loss_value,
                     "train_ppl": ppl,
                     "lr": lr,
+                    "tokens_seen": inputs.shape[0] * (batch_idx + 1),
                 },
             )
 

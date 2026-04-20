@@ -2,34 +2,43 @@ model_type: "gpt"
 exp_path: "gpt_training"
 
 # Data loading — higher throughput settings
-sample_similar_len: true        # Bucket similar-length sequences → less padding waste
-batch_size: 32                  # Larger batches saturate GPU compute
+mode: "varlen_packed"           # "varlen_packed" or "fixed_batch"
+train_file_pattern: "/mnt/d/d/DeepLearning/datasets/fineweb10b-pretokenized/fineweb_train_*.bin"
+test_file_pattern: "/mnt/d/d/DeepLearning/datasets/fineweb10b-pretokenized/fineweb_val_*.bin"
 num_workers: 8                  # More workers keep GPU fed
-persistent_workers: true        # Don't recreate workers each epoch
-use_pin_memory: true            # Faster CPU→GPU transfer
 prefetch_factor: 4              # Batches each worker pre-fetches
 
+# Only applicable for "fixed_batch" mode:
+# batch_size: 32                  # Larger batches saturate GPU compute
+# seq_len: 1024                   # Longer sequences increase GPU utilization
+
+# Only applicable for "varlen_packed" mode:
+packed_tokens: 8192          # Total tokens per batch (across all sequences)
+max_seq_len: 1024            # Max sequence length (for padding/truncation)
+
+
 # Training
-num_epochs: 1
 max_seq_len: 1024
 dataset_name: "roneneldan/TinyStories"
 device: "cuda:0"
 
 # Optimizer / LR
 init_lr: 0.001
-warmup_epochs: 0
+warmup_steps: 0
+num_epochs: 1                     # Keep this as 1 just to align with trainer infra.
+num_training_steps: 100_000
 lr_scheduler_type: "cosine"
 
 # Regularization
 label_smoothing: 0.1
 use_grad_accum: true
-iters_to_accumulate: 1          # Effective batch_size = batch_size * iters_to_accumulate
+iters_to_accumulate: 4          # Effective batch_size = batch_size * iters_to_accumulate
 
 # Mixed precision
 fp16_training: true
 
 # torch.compile for kernel fusion (PyTorch 2.x)
-use_compile: true
+use_compile: false
 
 # Logging / checkpointing
 use_wandb: true

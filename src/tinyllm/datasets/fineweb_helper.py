@@ -137,6 +137,10 @@ class NanoGPTDataset(IterableDataset):
 
     def __init__(self, cfg: DataLoaderConfig):
         self.cfg = cfg
+        if cfg.file_pattern is None:
+            raise ValueError(
+                "file_pattern must be specified in DataLoaderConfig"
+            )
         self._files = [Path(f) for f in sorted(glob.glob(cfg.file_pattern))]
         if not self._files:
             raise FileNotFoundError(

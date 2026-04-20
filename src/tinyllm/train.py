@@ -10,7 +10,10 @@ import os
 
 import torch
 
-from src.tinyllm.datasets.dataset_helper import DatasetHelper
+from src.tinyllm.datasets.fineweb_helper import (
+    DataLoaderConfig,
+    create_nanogpt_dataloader,
+)
 from src.tinyllm.utils.misc import get_tokenizer, Config, get_exp_path
 from src.tinyllm.callbacks.checkpoint_callback import CheckpointCallback
 from src.tinyllm.callbacks.wandb_callback import WandbCallback
@@ -40,41 +43,29 @@ def run(args):
     model = model_factory(model_config)
     tokenizer = get_tokenizer(model_config.tokenizer_name)
 
-    # Cache directory for pre-tokenized data (avoids re-tokenizing each run)
-    cache_dir = os.path.join(exp_path, "token_cache")
-    os.makedirs(cache_dir, exist_ok=True)
-
-    # Build data loaders — tokenize_upfront=True eliminates per-batch
-    # tokenizer overhead, which is the #1 cause of low GPU utilization.
-    train_loader = DatasetHelper(
-        tokenizer=tokenizer,
-        batch_size=train_config.batch_size,
-        seq_len=train_config.max_seq_len,
-        num_workers=train_config.num_workers,
-        persistent_workers=train_config.persistent_workers,
-        use_pin_memory=train_config.use_pin_memory,
-        sample_similar_len=train_config.sample_similar_len,
-        split="train",
-        dataset_name=train_config.dataset_name,
+    train_cfg = DataLoaderConfig(
+        mode=train_config.get("mode", "varlen_packed"),
+        file_pattern=train_config.get("train_file_pattern", None),
+        device=train_config.device,
+        packed_tokens=train_config.get("packed_tokens", 8192),
+        max_seq_len=train_config.get("max_seq_len", 2048),
+        align_to_bos=True,
+        num_workers=train_config.get("num_workers", 2),
         prefetch_factor=train_config.get("prefetch_factor", 4),
-        tokenize_upfront=True,
-        cache_dir=cache_dir,
-    ).get_loader()
+    )
+    train_loader = create_nanogpt_dataloader(train_cfg)
 
-    test_loader = DatasetHelper(
-        tokenizer=tokenizer,
-        batch_size=train_config.batch_size,
-        seq_len=train_config.max_seq_len,
-        num_workers=train_config.num_workers,
-        persistent_workers=train_config.persistent_workers,
-        use_pin_memory=train_config.use_pin_memory,
-        sample_similar_len=train_config.sample_similar_len,
-        split="validation",
-        dataset_name=train_config.dataset_name,
+    test_cfg = DataLoaderConfig(
+        mode=train_config.get("mode", "varlen_packed"),
+        file_pattern=train_config.get("test_file_pattern", None),
+        device=train_config.device,
+        packed_tokens=train_config.get("packed_tokens", 8192),
+        max_seq_len=train_config.get("max_seq_len", 2048),
+        align_to_bos=False,
+        num_workers=train_config.get("num_workers", 2),
         prefetch_factor=train_config.get("prefetch_factor", 4),
-        tokenize_upfront=True,
-        cache_dir=cache_dir,
-    ).get_loader()
+    )
+    test_loader = create_nanogpt_dataloader(test_cfg)
 
     # Optimizer
     optimizer = torch.optim.AdamW(
@@ -85,9 +76,17 @@ def run(args):
     )
 
     # LR scheduler
-    steps_per_epoch = len(train_loader)
-    num_warmup_steps = train_config.get("warmup_epochs", 0) * steps_per_epoch
-    num_training_steps = train_config.num_epochs * steps_per_epoch
+
+    num_warmup_steps = train_config.get("warmup_steps", 0)
+    try:
+        steps_per_epoch = len(train_loader)
+        num_training_steps = train_config.get("num_epochs", 1) * steps_per_epoch
+    except Exception as e:
+        logger.warning(
+            f"Could not determine steps_per_epoch from train_loader: {e}"
+        )
+        steps_per_epoch = None
+        num_training_steps = train_config.get("num_training_steps", 100)
 
     lr_scheduler = lr_scheduler_factory(
         train_config.lr_scheduler_type,

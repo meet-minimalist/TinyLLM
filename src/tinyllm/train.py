@@ -1,12 +1,4 @@
-"""
-Training entry point — loads configs, builds model, runs training loop.
-
-Usage:
-    python -m src.tinyllm.train -c configs/training/train_config.yaml -m configs/models/gpt.yaml
-"""
-
 import argparse
-import os
 
 import torch
 
@@ -17,9 +9,15 @@ from src.tinyllm.datasets.fineweb_helper import (
 from src.tinyllm.utils.misc import get_tokenizer, Config, get_exp_path
 from src.tinyllm.callbacks.checkpoint_callback import CheckpointCallback
 from src.tinyllm.callbacks.wandb_callback import WandbCallback
+from src.tinyllm.callbacks.analysis_callback import AnalysisCallback
+from src.tinyllm.callbacks.benchmark_callback import BenchmarkCallback
 from src.tinyllm.trainer.trainer import Trainer
 from src.tinyllm.logger.logger_utils import configure_logging, logger
-from src.tinyllm.factory.factory import model_factory, lr_scheduler_factory
+from src.tinyllm.factory.factory import (
+    model_factory,
+    optimizer_factory,
+    lr_scheduler_factory,
+)
 
 
 def run(args):
@@ -39,7 +37,6 @@ def run(args):
 
     device = torch.device(train_config.device)
 
-    # Build model
     model = model_factory(model_config)
     tokenizer = get_tokenizer(model_config.tokenizer_name)
 
@@ -67,25 +64,13 @@ def run(args):
     )
     test_loader = create_nanogpt_dataloader(test_cfg)
 
-    # Optimizer
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=train_config.get("init_lr", 3e-4),
-        weight_decay=0.1,
-        fused=True,
-    )
-
-    # LR scheduler
+    optimizer = optimizer_factory(model, train_config)
 
     num_warmup_steps = train_config.get("warmup_steps", 0)
     try:
         steps_per_epoch = len(train_loader)
         num_training_steps = train_config.get("num_epochs", 1) * steps_per_epoch
-    except Exception as e:
-        logger.warning(
-            f"Could not determine steps_per_epoch from train_loader: {e}"
-        )
-        steps_per_epoch = None
+    except Exception:
         num_training_steps = train_config.get("num_training_steps", 100)
 
     lr_scheduler = lr_scheduler_factory(
@@ -95,14 +80,20 @@ def run(args):
         num_warmup_steps=num_warmup_steps,
     )
 
-    # Callbacks
     callbacks = [
         CheckpointCallback(exp_path, "model", max_to_keep=3),
     ]
     if getattr(train_config, "use_wandb", False):
         callbacks.append(WandbCallback())
 
-    # Trainer
+    analysis_config = train_config.get("analysis", {})
+    if analysis_config.get("every_n_steps", 0) > 0:
+        callbacks.append(AnalysisCallback(analysis_config))
+
+    benchmark_config = train_config.get("benchmarks", {})
+    if benchmark_config:
+        callbacks.append(BenchmarkCallback(benchmark_config))
+
     trainer = Trainer(
         model=model,
         optimizer=optimizer,

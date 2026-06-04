@@ -1,46 +1,51 @@
 model_type: "gpt"
 exp_path: "gpt_training"
 
-# Data loading — higher throughput settings
-mode: "varlen_packed"           # "varlen_packed" or "fixed_batch"
+mode: "varlen_packed"
 train_file_pattern: "/mnt/d/d/DeepLearning/datasets/fineweb10b-pretokenized/fineweb_train_*.bin"
 test_file_pattern: "/mnt/d/d/DeepLearning/datasets/fineweb10b-pretokenized/fineweb_val_*.bin"
-num_workers: 8                  # More workers keep GPU fed
-prefetch_factor: 4              # Batches each worker pre-fetches
+num_workers: 8
+prefetch_factor: 4
 
-# Only applicable for "fixed_batch" mode:
-# batch_size: 32                  # Larger batches saturate GPU compute
-# seq_len: 1024                   # Longer sequences increase GPU utilization
-
-# Only applicable for "varlen_packed" mode:
-packed_tokens: 8192          # Total tokens per batch (across all sequences)
-max_seq_len: 1024            # Max sequence length (for padding/truncation)
-
-
-# Training
+packed_tokens: 8192
 max_seq_len: 1024
-dataset_name: "roneneldan/TinyStories"
+
 device: "cuda:0"
 
-# Optimizer / LR
+optimizer:
+  type: "muon_adamw"
+  muon_lr: 0.0002
+  adamw_lr: 0.001
+  muon_momentum: 0.95
+  weight_decay: 0.1
+  adamw_betas: [0.9, 0.95]
+
 init_lr: 0.001
 warmup_steps: 0
-num_epochs: 1                     # Keep this as 1 just to align with trainer infra.
+num_epochs: 1
 num_training_steps: 100_000
 lr_scheduler_type: "cosine"
 
-# Regularization
 label_smoothing: 0.1
 use_grad_accum: true
-iters_to_accumulate: 4          # Effective batch_size = batch_size * iters_to_accumulate
+iters_to_accumulate: 4
 
-# Mixed precision
 fp16_training: true
-
-# torch.compile for kernel fusion (PyTorch 2.x)
 use_compile: false
 
-# Logging / checkpointing
+log_every: 10
 use_wandb: true
 resume_wandb_id: null
-track_gradients: false
+
+analysis:
+  every_n_steps: 500
+  track_weights: true
+  track_activations: false
+  spectral: false
+  variance_thresholds: [0.95, 0.99]
+
+benchmarks:
+  hellaswag:
+    enabled: false
+    num_samples: 200
+    every_n_steps: 500

@@ -100,12 +100,25 @@ class _MHA(nn.Module):
         if mask is not None:
             attn = attn + mask
 
-        weights = torch.softmax(attn, dim=-1)
-        weights = self.dropout(weights)
+        weights_sm = torch.softmax(attn, dim=-1)
+        weights = self.dropout(weights_sm)
         out = torch.matmul(weights, v)
         out = out.transpose(1, 2).contiguous().view(x.shape[0], seq_len, -1)
-        out = self.out_proj(out)
-        return self.layer_norm(x + self.dropout(out))
+        o_proj_output = self.out_proj(out)
+        res_add = x + self.dropout(out)
+        ln_output = self.layer_norm(res_add)
+        ret_dict = {
+            "q": q,
+            "k": k,
+            "v": v,
+            "attn_mat": attn,
+            "attn_mat_sm": weights_sm,
+            "qkv_out": out,
+            "o_proj_out": o_proj_output,
+            "residual_add": res_add,
+            "ln_out": ln_output,
+        }
+        return ln_output, ret_dict
 
 
 class _GQA(nn.Module):
@@ -195,7 +208,9 @@ class _GQA(nn.Module):
             .contiguous()
             .view(b, s, -1)
         )
-        return self.o_proj(out)
+        o_proj_output = self.o_proj(out)
+
+        return o_proj_output
 
 
 class _StandardFFN(nn.Module):

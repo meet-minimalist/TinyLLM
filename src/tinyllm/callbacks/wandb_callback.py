@@ -1,13 +1,7 @@
-"""
-WandB callback — logs metrics to Weights & Biases.
-"""
-
 from src.tinyllm.callbacks.base_callback import BaseCallback
 
 
 class WandbCallback(BaseCallback):
-    """Logs training/evaluation metrics to Weights & Biases."""
-
     def __init__(self):
         try:
             import wandb
@@ -37,14 +31,7 @@ class WandbCallback(BaseCallback):
             id=resume_id,
         )
 
-        if (
-            getattr(train_config, "track_weight_stats", False)
-            and model is not None
-        ):
-            try:
-                self.wandb.watch(model, log="all", log_freq=100)
-            except Exception:
-                pass
+        self.wandb.watch(model, log="all", log_freq=100)
 
     def on_train_end(self, **kwargs):
         self.wandb.finish()

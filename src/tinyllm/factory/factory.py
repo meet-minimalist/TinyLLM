@@ -1,43 +1,46 @@
-"""
-Factory functions for creating models and LR schedulers from config.
-"""
-
 from box import Box
-from torch.optim.lr_scheduler import (
-    LambdaLR,
-    CosineAnnealingLR,
-    LinearLR,
-    ConstantLR,
-)
 
 from src.tinyllm.factory.registry import MODEL_REGISTRY
 from src.tinyllm.logger.logger_utils import logger
 
-# Built-in schedulers (no external dependency)
-_builtin_schedulers = {
-    "cosine": CosineAnnealingLR,
-    "linear": LinearLR,
-    "constant": ConstantLR,
-}
-
 
 def model_factory(model_config: Box):
-    """
-    Create a model instance based on the model_type in config.
-
-    Args:
-        model_config: Model architecture config (Box).
-
-    Returns:
-        nn.Module: Model instance.
-    """
     if not hasattr(model_config, "model_type"):
         raise ValueError("model_type must be specified in model_config.")
 
-    # Ensure model classes are registered by importing the models module
-    import src.tinyllm.models  # noqa: F401 — triggers registry
+    import src.tinyllm.models
 
     return MODEL_REGISTRY.get(model_config.model_type)(model_config)
+
+
+def optimizer_factory(model, train_config):
+    opt_type = train_config.get("optimizer", {}).get("type", "adamw")
+
+    if opt_type == "muon_adamw":
+        from src.tinyllm.optimizer.muon import build_muon_adamw_optimizer
+
+        opt_cfg = train_config.get("optimizer", {})
+        logger.info("Using Muon + AdamW hybrid optimizer")
+        return build_muon_adamw_optimizer(
+            model,
+            muon_lr=opt_cfg.get("muon_lr", 0.0002),
+            adamw_lr=opt_cfg.get(
+                "adamw_lr", train_config.get("init_lr", 0.001)
+            ),
+            weight_decay=opt_cfg.get("weight_decay", 0.1),
+            momentum=opt_cfg.get("muon_momentum", 0.95),
+            adamw_betas=opt_cfg.get("adamw_betas", (0.9, 0.95)),
+        )
+
+    import torch
+
+    logger.info("Using AdamW optimizer")
+    return torch.optim.AdamW(
+        model.parameters(),
+        lr=train_config.get("init_lr", 3e-4),
+        weight_decay=0.1,
+        fused=True,
+    )
 
 
 def lr_scheduler_factory(
@@ -45,19 +48,7 @@ def lr_scheduler_factory(
     optimizer,
     num_training_steps: int,
     num_warmup_steps: int = 0,
-) -> LambdaLR:
-    """
-    Create a learning rate scheduler.
-
-    Args:
-        scheduler_name: Name of scheduler type.
-        optimizer: PyTorch optimizer.
-        num_training_steps: Total training steps.
-        num_warmup_steps: Number of warmup steps.
-
-    Returns:
-        LR scheduler instance.
-    """
+):
     if scheduler_name == "cosine":
         from transformers.optimization import get_cosine_schedule_with_warmup
 
@@ -93,5 +84,5 @@ def lr_scheduler_factory(
     else:
         raise ValueError(
             f"Unknown scheduler: {scheduler_name}. "
-            f"Supported: {list(_builtin_schedulers.keys())}"
+            f"Supported: cosine, linear, constant, constant_warmup, inverse_sqrt"
         )

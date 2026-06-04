@@ -7,6 +7,7 @@ from src.tinyllm.datasets.fineweb_helper import (
     create_nanogpt_dataloader,
 )
 from src.tinyllm.utils.misc import get_tokenizer, Config, get_exp_path
+from src.tinyllm.utils.kernels import apply_kernel_patches
 from src.tinyllm.callbacks.checkpoint_callback import CheckpointCallback
 from src.tinyllm.callbacks.wandb_callback import WandbCallback
 from src.tinyllm.callbacks.analysis_callback import AnalysisCallback
@@ -38,31 +39,27 @@ def run(args):
     device = torch.device(train_config.device)
 
     model = model_factory(model_config)
+    model = apply_kernel_patches(model, train_config)
     tokenizer = get_tokenizer(model_config.tokenizer_name)
 
-    train_cfg = DataLoaderConfig(
-        mode=train_config.get("mode", "varlen_packed"),
-        file_pattern=train_config.get("train_file_pattern", None),
-        device=train_config.device,
-        packed_tokens=train_config.get("packed_tokens", 8192),
-        max_seq_len=train_config.get("max_seq_len", 2048),
-        align_to_bos=True,
-        num_workers=train_config.get("num_workers", 2),
-        prefetch_factor=train_config.get("prefetch_factor", 4),
-    )
-    train_loader = create_nanogpt_dataloader(train_cfg)
+    def _build_loader(is_train: bool) -> DataLoaderConfig:
+        return DataLoaderConfig(
+            mode=train_config.get("mode", "varlen_packed"),
+            file_pattern=train_config.get(
+                "train_file_pattern" if is_train else "test_file_pattern", None
+            ),
+            device=train_config.device,
+            packed_tokens=train_config.get("packed_tokens", 8192),
+            max_seq_len=train_config.get("max_seq_len", 2048),
+            align_to_bos=is_train,
+            num_workers=train_config.get("num_workers", 2),
+            prefetch_factor=train_config.get("prefetch_factor", 4),
+            max_batches=train_config.get("max_batches", 0),
+            max_tokens=train_config.get("max_tokens", 0),
+        )
 
-    test_cfg = DataLoaderConfig(
-        mode=train_config.get("mode", "varlen_packed"),
-        file_pattern=train_config.get("test_file_pattern", None),
-        device=train_config.device,
-        packed_tokens=train_config.get("packed_tokens", 8192),
-        max_seq_len=train_config.get("max_seq_len", 2048),
-        align_to_bos=False,
-        num_workers=train_config.get("num_workers", 2),
-        prefetch_factor=train_config.get("prefetch_factor", 4),
-    )
-    test_loader = create_nanogpt_dataloader(test_cfg)
+    train_loader = create_nanogpt_dataloader(_build_loader(True))
+    test_loader = create_nanogpt_dataloader(_build_loader(False))
 
     optimizer = optimizer_factory(model, train_config)
 

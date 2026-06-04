@@ -1,8 +1,8 @@
 model_type: "dynamic"
-tokenizer_name: "Qwen/Qwen2.5-0.5B"
+tokenizer_name: "gpt2"
 
 d_model: 256
-vocab_size: 50304
+vocab_size: 50304  # nearest multiple of 64 for GPT-2 (same across all models)
 max_seq_len: 1024
 embedding: "rope_only"
 

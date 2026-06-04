@@ -35,6 +35,10 @@ class DataLoaderConfig:
     batch_size: int = 4
     seq_len: int = 512
 
+    # Limits (useful for testing — 0 = no limit)
+    max_batches: int = 0  # Stop after this many batches (0 = unlimited)
+    max_tokens: int = 0  # Stop after this many total tokens (0 = unlimited)
+
     # Shared
     bos_token: int = BOS_ID
     num_workers: int = 0
@@ -137,6 +141,8 @@ class NanoGPTDataset(IterableDataset):
 
     def __init__(self, cfg: DataLoaderConfig):
         self.cfg = cfg
+        self._batch_count = 0
+        self._token_count = 0
         if cfg.file_pattern is None:
             raise ValueError(
                 "file_pattern must be specified in DataLoaderConfig"
@@ -147,11 +153,21 @@ class NanoGPTDataset(IterableDataset):
                 f"No files match pattern: {cfg.file_pattern}"
             )
 
+    def _should_stop(self) -> bool:
+        cfg = self.cfg
+        if cfg.max_batches > 0 and self._batch_count >= cfg.max_batches:
+            return True
+        if cfg.max_tokens > 0 and self._token_count >= cfg.max_tokens:
+            return True
+        return False
+
     def _iter_varlen(
         self,
     ) -> Iterator[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
         """Yields: (inputs [N], targets [N], cu_seqlens [M+1])"""
         for file_path in self._files:
+            if self._should_stop():
+                return
             shard = _load_data_shard_lazy(file_path)
             scanner = BOSScanner(shard, self.cfg.bos_token)
             bos_idx = scanner.get_indices()
@@ -208,21 +224,29 @@ class NanoGPTDataset(IterableDataset):
 
                 # Move to device
                 dev = self.cfg.device
+                self._batch_count += 1
+                self._token_count += inputs.shape[0]
                 yield (
                     inputs.to(dev, non_blocking=True),
                     targets.to(dev, non_blocking=True),
                     cu_seqlens.to(dev, non_blocking=True),
                 )
+                if self._should_stop():
+                    return
 
     def _iter_fixed(self) -> Iterator[Tuple[torch.Tensor, torch.Tensor]]:
         """Yields: (inputs [B, S], targets [B, S])"""
         for file_path in self._files:
+            if self._should_stop():
+                return
             shard = _load_data_shard_lazy(file_path)
             total = shard["num_tokens"]
             chunk_len = self.cfg.batch_size * (self.cfg.seq_len + 1)
             pos = 0
 
             while pos + chunk_len <= total:
+                if self._should_stop():
+                    return
                 buf = _read_tokens_slice(shard, pos, pos + chunk_len)
                 buf = buf.view(self.cfg.batch_size, self.cfg.seq_len + 1)
 
@@ -231,6 +255,8 @@ class NanoGPTDataset(IterableDataset):
                 pos += self.cfg.batch_size * self.cfg.seq_len
 
                 dev = self.cfg.device
+                self._batch_count += 1
+                self._token_count += inputs.numel()
                 yield (
                     inputs.to(dev, non_blocking=True),
                     targets.to(dev, non_blocking=True),

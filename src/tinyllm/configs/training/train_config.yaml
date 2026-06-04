@@ -46,6 +46,10 @@ analysis:
   track_alpha: true
   variance_thresholds: [0.95, 0.99]
 
+kernels:
+  use_liger: false     # requires: pip install liger-kernel
+  use_flash_attn: false # uses F.scaled_dot_product_attention
+
 benchmarks:
   hellaswag:
     enabled: false

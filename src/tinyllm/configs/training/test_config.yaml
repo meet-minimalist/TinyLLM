@@ -1,0 +1,44 @@
+model_type: "dynamic"
+exp_path: "test_run"
+
+mode: "varlen_packed"
+train_file_pattern: "C:/path/to/fineweb_train_*.bin"
+test_file_pattern: "C:/path/to/fineweb_val_*.bin"
+num_workers: 0
+prefetch_factor: 2
+
+packed_tokens: 4096
+max_seq_len: 512
+
+device: "cpu"
+
+optimizer:
+  type: "adamw"
+
+init_lr: 0.001
+warmup_steps: 10
+num_epochs: 1
+num_training_steps: 20
+lr_scheduler_type: "cosine"
+
+label_smoothing: 0.0
+use_grad_accum: false
+
+fp16_training: false
+use_compile: false
+
+log_every: 1
+use_wandb: false
+
+# Limit to 5 batches for quick validation
+max_batches: 5
+max_tokens: 0
+
+analysis:
+  every_n_steps: 5
+  track_weights: true
+  track_gradients: false
+  track_activations: false
+  spectral: false
+
+benchmarks: {}

@@ -1,31 +1,59 @@
 """
 Optional integration with optimized Triton kernels.
 
-Supports:
-  - liger-kernel: fused CrossEntropy, RoPE, SwiGLU, RMSNorm, LayerNorm
-  - flash-attn:   faster attention via flash_attn package (not just PyTorch's SDPA)
+Currently supported:
+  - liger-kernel: fused RMSNorm, RoPE, SwiGLU, CrossEntropy, LayerNorm
+    (https://github.com/linkedin/Liger-Kernel)
+  - flash-attn:   faster attention via flash_attn package
+    (https://github.com/Dao-AILab/flash-attention)
 
-Enable via config:
-  kernels:
-    use_flash_attn: true       # uses F.scaled_dot_product_attention
-    use_liger: true            # uses liger-kernel fused ops
-
-All imports are lazy — these packages are NOT required to run the codebase.
+All imports are lazy — these packages are NOT required.
 """
 
 import torch
+import torch.nn as nn
 
 
-def try_liger_patch(model):
+def apply_kernel_patches(model: nn.Module, config: dict) -> nn.Module:
     """
-    Attempt to patch model modules with liger-kernel fused implementations.
+    Apply all enabled kernel patches to a model.
 
-    Returns the patched model (or original if liger not available).
+    Called after model construction in train.py.
+    Config keys under 'kernels':
+        use_liger: bool   — patch with liger-kernel fused ops
+        use_flash_attn: bool  — uses F.scaled_dot_product_attention
+            (handled per-layer via the `flash` parameter, not here)
+
+    Returns the patched model (or original if nothing to apply).
+    """
+    cfg = (
+        config.get("kernels", {})
+        if isinstance(config, dict)
+        else getattr(config, "kernels", {})
+    )
+    if not cfg:
+        return model
+
+    if cfg.get("use_liger", False):
+        model = _patch_liger(model)
+
+    if cfg.get("use_flash_attn", False):
+        _patch_attention_flash(model)
+
+    return model
+
+
+def _patch_liger(model: nn.Module) -> nn.Module:
+    """
+    Patch model with liger-kernel fused implementations.
+
+    Replaces RMSNorm, LayerNorm, RoPE, SwiGLU, etc. with fused Triton kernels.
+    liger-kernel's apply_liger_kernel_to_model handles all supported architectures.
     """
     try:
         from liger_kernel.transformers import apply_liger_kernel_to_model
 
-        apply_liger_kernel_to_model(model)
+        model = apply_liger_kernel_to_model(model)
         return model
     except ImportError:
         return model
@@ -33,36 +61,50 @@ def try_liger_patch(model):
         return model
 
 
+def _patch_attention_flash(model: nn.Module):
+    """Sets flash=True on all attention modules in the model."""
+    for module in model.modules():
+        if hasattr(module, "flash"):
+            module.flash = True
+
+
 def try_liger_cross_entropy():
     """
-    Return liger-kernel's fused CrossEntropyLoss if available,
-    otherwise return None (fallback to standard CE).
+    Return liger-kernel's fused CrossEntropyLoss if available.
+
+    FusedLinearCrossEntropy avoids materializing the full logits tensor
+    by chunking the computation. Can reduce memory by ~60% for large vocab.
     """
     try:
-        from liger_kernel.transformers import LigerCrossEntropyLoss
+        from liger_kernel.transformers import LigerFusedLinearCrossEntropyLoss
 
-        return LigerCrossEntropyLoss
+        return LigerFusedLinearCrossEntropyLoss
     except ImportError:
         return None
 
 
-def try_flash_attn(attn_fn):
-    """
-    Attempt to replace attention with flash-attn package.
-
-    This is more flexible than PyTorch's SDPA (supports GQA natively
-    without repeating kv heads, sliding window, etc.).
-    """
+def try_liger_rmsnorm():
+    """Return liger-kernel's fused RMSNorm class if available."""
     try:
-        from flash_attn.flash_attention import FlashMHA
+        from liger_kernel.transformers import LigerRMSNorm
 
-        return FlashMHA
+        return LigerRMSNorm
     except ImportError:
         return None
 
 
-def check_kernel_status():
-    """Return dict indicating which optional kernels are available."""
+def try_liger_swiglu():
+    """Return liger-kernel's fused SwiGLU MLP class if available."""
+    try:
+        from liger_kernel.transformers.swiglu import LigerSwiGLUMLP
+
+        return LigerSwiGLUMLP
+    except ImportError:
+        return None
+
+
+def check_kernel_status() -> dict:
+    """Report which optional kernel packages are available."""
     status = {
         "flash_attn_in_torch": hasattr(
             torch.nn.functional, "scaled_dot_product_attention"
@@ -79,7 +121,7 @@ def check_kernel_status():
     try:
         import liger_kernel
 
-        status["liger_kernel"] = True
+        status["liger_kernel"] = len(dir(liger_kernel)) > 0
     except ImportError:
         pass
     return status

@@ -257,21 +257,43 @@ attention matrix is returned for analysis.
 
 ### 9. Optional Triton Kernel Integration (`utils/kernels.py`)
 
-The `utils/kernels.py` module provides optional integration with:
-- **liger-kernel**: fused CrossEntropy, RoPE, SwiGLU, RMSNorm, LayerNorm
-- **flash-attn**: faster attention
+The `utils/kernels.py` module provides automatic integration with optimized
+Triton kernels. It is called automatically in `train.py` right after model
+construction.
 
-Both are optional (not in core requirements). Install with:
+**How it wires in:**
 ```
-pip install liger-kernel flash-attn
+train.py: model = model_factory(model_config)
+         model = apply_kernel_patches(model, train_config)   # ← here
 ```
 
-Set config:
+**Supported backends (optional — install only what you need):**
+
+| Backend | Install | What it fuses |
+|---------|---------|---------------|
+| **liger-kernel** | `pip install liger-kernel` | RMSNorm, RoPE, SwiGLU, CrossEntropy, LayerNorm — 20% throughput boost, 60% memory reduction |
+| **flash-attn** | `pip install flash-attn` | Flash Attention v2/v3 — more flexible than PyTorch SDPA (sliding window, ALiBi) |
+
+Set config in `train_config.yaml`:
 ```yaml
 kernels:
-  use_flash_attn: true    # uses F.scaled_dot_product_attention
   use_liger: true         # patches model with liger fused ops
+  use_flash_attn: true    # enables flash attention on all layers
 ```
+
+**What liger-kernel patches:**
+- `RMSNorm` → triton-fused normalization (eliminates 2 intermediate tensors per layer)
+- `LayerNorm` → triton-fused normalization
+- `RoPE` → triton-fused position encoding (no intermediate cos/sin buffers)
+- `SwiGLU/GeGLU` → triton-fused gated activation (eliminates activation intermediates)
+- `CrossEntropy` → chunked computation (avoids materializing full logits)
+
+**How it works:**
+`apply_kernel_patches()` iterates through the config's `kernels` section and:
+1. For `use_liger`: calls `liger_kernel.transformers.apply_liger_kernel_to_model(model)`
+2. For `use_flash_attn`: sets `flash=True` on all attention submodules
+
+No model architecture changes needed — it's a one-line patch.
 
 ### 10. Dataset Design
 

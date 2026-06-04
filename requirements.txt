@@ -7,3 +7,9 @@ tqdm>=4.66.5
 transformers>=4.43.4
 wandb>=0.19.8
 python-box
+
+# Optional: flash attention (faster attention on CUDA)
+# flash-attn>=2.6.0
+
+# Optional: liger-kernel (fused Triton kernels for CE, RoPE, LayerNorm, SwiGLU)
+# liger-kernel>=0.5.0

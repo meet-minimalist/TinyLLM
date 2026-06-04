@@ -2,7 +2,6 @@ import torch.nn as nn
 
 from src.tinyllm.layers.registry import LAYER_REGISTRY
 
-
 _ACT_DICT = {"gelu": nn.GELU(), "relu": nn.ReLU(), "swish": nn.SiLU()}
 
 

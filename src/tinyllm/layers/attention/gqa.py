@@ -2,6 +2,7 @@ from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from src.tinyllm.layers.registry import LAYER_REGISTRY
 from src.tinyllm.models.layers.rope import apply_rotary_pos_emb
@@ -19,6 +20,7 @@ class GQA(nn.Module):
         qkv_bias: bool = False,
         o_proj_bias: bool = False,
         use_qk_norm: bool = False,
+        flash: bool = False,
         **kwargs,
     ):
         super().__init__()
@@ -28,6 +30,7 @@ class GQA(nn.Module):
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
         self.num_groups = num_heads // num_kv_heads
+        self.flash = flash
 
         self.q_proj = nn.Linear(
             emb_dim, num_heads * self.head_dim, bias=qkv_bias
@@ -78,29 +81,41 @@ class GQA(nn.Module):
         if cos is not None and sin is not None:
             q, k = apply_rotary_pos_emb(q, k, cos, sin)
         if self.q_norm is not None:
-            q, k = self.q_norm(q), self.k_norm(k)
-        if self.num_groups > 1:
-            k = k.repeat_interleave(self.num_groups, dim=1)
-            v = v.repeat_interleave(self.num_groups, dim=1)
+            q_norm_out = self.q_norm(q)
+            k_norm_out = self.k_norm(k)
+            q, k = q_norm_out, k_norm_out
 
-        scores = (q @ k.transpose(-2, -1)) * (self.head_dim**-0.5)
-        if mask is not None:
-            scores = scores + mask
+        if self.flash:
+            if self.num_groups > 1:
+                k = k.repeat_interleave(self.num_groups, dim=1)
+                v = v.repeat_interleave(self.num_groups, dim=1)
+            attn_out = F.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                attn_mask=None,
+                dropout_p=self.dropout.p if self.training else 0.0,
+                is_causal=True,
+            )
+            attn_weights = None
+        else:
+            if self.num_groups > 1:
+                k = k.repeat_interleave(self.num_groups, dim=1)
+                v = v.repeat_interleave(self.num_groups, dim=1)
+            scores = (q @ k.transpose(-2, -1)) * (self.head_dim**-0.5)
+            if mask is not None:
+                scores = scores + mask
+            attn_weights = torch.softmax(scores, dim=-1)
+            attn_out = self.dropout(attn_weights) @ v
 
-        attn_weights = torch.softmax(scores, dim=-1)
-        attn_out = (
-            (self.dropout(attn_weights) @ v)
-            .transpose(1, 2)
-            .contiguous()
-            .view(b, s, -1)
-        )
+        attn_out = attn_out.transpose(1, 2).contiguous().view(b, s, -1)
         o_proj_output = self.o_proj(attn_out)
 
         metadata = {
             "q": q,
             "k": k,
             "v": v,
-            "attn_logits": scores,
+            "attn_logits": None,
             "attn_weights": attn_weights,
             "qkv_out": attn_out,
             "o_proj_out": o_proj_output,

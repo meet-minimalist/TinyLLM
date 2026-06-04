@@ -1,12 +1,19 @@
-model_type: "gpt"
+model_type: "dynamic"
 tokenizer_name: "gpt2"
 
+d_model: 256
 vocab_size: 50304
-emb_dim: 256
 max_seq_len: 1024
-num_heads: 4
-drop_prob: 0.1
-ff_multiplier: 4
-num_blocks: 4
-tie_weights: true
-act_fn: "gelu"
+embedding: "learned_pe"
+
+blocks:
+  count: 4
+  attention: "mha"
+  ffn: "standard"
+  norm: "layer_norm"
+  num_heads: 4
+  ff_multiplier: 4
+
+head:
+  norm: "layer_norm"
+  tie_weights: true

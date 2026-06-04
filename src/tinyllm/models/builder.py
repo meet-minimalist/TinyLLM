@@ -1,9 +1,21 @@
+import torch
 import torch.nn as nn
 
 from src.tinyllm.layers.registry import LAYER_REGISTRY
 from src.tinyllm.layers.transformer_block import TransformerBlock
 from src.tinyllm.models.base import BaseLLM
 from src.tinyllm.factory.registry import MODEL_REGISTRY
+
+
+def _first_key(cfg, *keys, default=None):
+    for k in keys:
+        if isinstance(cfg, dict):
+            v = cfg.get(k)
+        else:
+            v = getattr(cfg, k, None)
+        if v is not None:
+            return v
+    return default
 
 
 @MODEL_REGISTRY.register("dynamic")
@@ -24,42 +36,48 @@ class DynamicModel(BaseLLM):
             max_seq_len=max_seq_len, emb_dim=d_model
         )
 
-        block_cfg = {
-            k: v
-            for k, v in cfg.items()
-            if k
-            not in (
-                "model_type",
-                "tokenizer_name",
-                "vocab_size",
-                "max_seq_len",
-                "embedding",
-                "head",
-            )
+        blocks_cfg = _first_key(cfg, "blocks", default={})
+        ff_mult = _first_key(
+            blocks_cfg, "ff_multiplier", "ffn_multiplier", default=4
+        )
+        block_config = {
+            "d_model": d_model,
+            "num_heads": _first_key(blocks_cfg, "num_heads", default=4),
+            "ff_multiplier": ff_mult,
+            "drop_prob": _first_key(blocks_cfg, "drop_prob", default=0.0),
+            "attention": _first_key(blocks_cfg, "attention", default="mha"),
+            "ffn": _first_key(blocks_cfg, "ffn", default="standard"),
+            "norm": _first_key(blocks_cfg, "norm", default="layer_norm"),
+            "act_fn": _first_key(blocks_cfg, "act_fn", default="gelu"),
         }
-        block_cfg["d_model"] = d_model
-        block_cfg.setdefault("attention", "mha")
-        block_cfg.setdefault("ffn", "standard")
-        block_cfg.setdefault("norm", "layer_norm")
-        block_cfg.setdefault("drop_prob", 0.0)
-        block_cfg.setdefault("ff_multiplier", 4)
+        for k, v in blocks_cfg.items():
+            if k not in (
+                "count",
+                "attention",
+                "ffn",
+                "norm",
+                "num_heads",
+                "ff_multiplier",
+                "ffn_multiplier",
+                "drop_prob",
+                "drop_rate",
+                "act_fn",
+            ):
+                block_config[k] = v
 
-        num_blocks = cfg.get(
-            "num_blocks",
-            cfg.get("num_layers", cfg.get("blocks", {}).get("count", 4)),
-        )
+        num_blocks = _first_key(blocks_cfg, "count", default=4)
         self.transformer_blocks = nn.ModuleList(
-            [TransformerBlock(block_cfg) for _ in range(num_blocks)]
+            [TransformerBlock(block_config) for _ in range(num_blocks)]
         )
 
-        head_cfg = cfg.get("head", {})
-        norm_type = head_cfg.get("norm", cfg.get("norm", "layer_norm"))
+        head_cfg = _first_key(cfg, "head", default={})
+        norm_type = _first_key(head_cfg, "norm", default="layer_norm")
         norm_cls = LAYER_REGISTRY.get(norm_type)
         self.final_norm = norm_cls(d_model)
 
         self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
 
-        tie = cfg.get("tie_weights", head_cfg.get("tie_weights", False))
+        tie = _first_key(head_cfg, "tie_weights", default=False)
         if tie:
             self.lm_head.weight = self.token_embedding.weight
 

@@ -1,14 +1,21 @@
-model_type: "qwen3"
+model_type: "dynamic"
 tokenizer_name: "Qwen/Qwen2.5-0.5B"
 
 d_model: 256
 vocab_size: 50304
 max_seq_len: 1024
-num_layers: 4
-num_heads: 8
-num_kv_heads: 2
-drop_rate: 0.1
-ffn_multiplier: 4
-tie_word_embeddings: true
-use_qk_norm: true
-ffn_act: "swish"
+embedding: "rope_only"
+
+blocks:
+  count: 4
+  attention: "gqa"
+  ffn: "gated"
+  norm: "rms"
+  num_heads: 8
+  num_kv_heads: 2
+  ff_multiplier: 4
+  use_qk_norm: true
+
+head:
+  norm: "rms"
+  tie_weights: true

@@ -16,66 +16,59 @@ src/tinyllm/
 │
 ├── configs/
 │   ├── models/                  # Per-architecture YAML configs
-│   │   ├── gpt.yaml
-│   │   └── qwen3.yaml
+│   │   ├── gpt.yaml             # GPT-style (learned PE + MHA + standard FFN)
+│   │   └── qwen3.yaml           # Qwen3-style (RoPE + GQA + gated FFN + RMSNorm)
 │   └── training/                # Training hyperparameter configs
 │       └── train_config.yaml
 │
-├── models/                      # Full model definitions
+├── models/
 │   ├── base.py                  # BaseLLM — shared init_weights, forward helpers
-│   ├── builder.py               # build_model_from_config() — dynamic composition
-│   ├── gpt.py                   # GPT wrapper (delegates to builder)
-│   └── qwen3.py                 # Qwen3 wrapper (delegates to builder)
+│   └── builder.py               # DynamicModel — reads any config, builds model
 │
 ├── layers/                      # Modular, registered layer components
-│   ├── __init__.py              # Exports all layers & TransformerBlock
+│   ├── __init__.py              # Registers all layers on import
 │   ├── registry.py              # LAYER_REGISTRY — decorator-based registration
 │   ├── transformer_block.py     # Generic block; resolves attn/ffn/norm from registry
-│   │
 │   ├── attention/
-│   │   ├── mha.py               # Multi-Head Attention (registered as "mha")
-│   │   └── gqa.py               # Grouped Query Attention (registered as "gqa")
-│   │
+│   │   ├── mha.py               # Multi-Head Attention (registered "mha")
+│   │   └── gqa.py               # Grouped Query Attention (registered "gqa")
 │   ├── ffn/
-│   │   ├── standard_ffn.py      # Standard FFN (registered as "standard")
-│   │   └── gated_ffn.py         # Gated FFN / SwiGLU (registered as "gated")
-│   │
+│   │   ├── standard_ffn.py      # Standard FFN (registered "standard")
+│   │   └── gated_ffn.py         # Gated FFN / SwiGLU (registered "gated")
 │   ├── normalization/
-│   │   ├── layernorm.py         # torch.nn.LayerNorm wrapper (registered as "layer_norm")
-│   │   └── rmsnorm.py           # RMSNorm (registered as "rms")
-│   │
+│   │   ├── layernorm.py         # LayerNorm (registered "layer_norm")
+│   │   └── rmsnorm.py           # RMSNorm (registered "rms")
 │   └── embeddings/
-│       ├── learned_pe.py        # Learnable positional embeddings
-│       ├── sinusoidal_pe.py     # Sinusoidal positional embeddings
-│       └── rope.py              # Rotary Positional Embedding
+│       ├── learned_pe.py        # Learnable pos embeddings (registered "learned_pe")
+│       ├── sinusoidal_pe.py     # Sinusoidal PE (registered "sinusoidal")
+│       └── rope_only.py         # No-op PE, for RoPE-only models (registered "rope_only")
 │
 ├── datasets/
 │   ├── fineweb_helper.py        # FineWeb pretokenized binary loader
-│   ├── dataset_helper.py        # HuggingFace dataset loader
-│   └── __init__.py
+│   └── dataset_helper.py        # HuggingFace dataset loader
 │
 ├── optimizer/
-│   ├── muon.py                  # Muon optimizer + MuonAdamW hybrid
+│   ├── muon.py                  # Muon + MuonAdamW hybrid optimizer
 │   └── __init__.py
 │
 ├── analysis/                    # Weight & activation analysis toolkit
-│   ├── spectral.py              # SVD, eigenvalue decomposition, variance explained
-│   ├── weight_stats.py          # Weight norm, sparsity, min/max/mean/std
+│   ├── spectral.py              # SVD, eigenvalues, variance explained, WeightWatcher alpha
+│   ├── weight_stats.py          # Weight/gradient norm, sparsity, min/max/mean/std
 │   ├── activation_stats.py      # Activation hooking & statistics
 │   └── __init__.py
 │
-├── benchmarks/                  # Lightweight downstream eval
+├── benchmarks/
 │   ├── base.py                  # BaseBenchmark ABC
-│   ├── hellaswag.py             # HellaSwag (subsampled, ~200 examples)
-│   ├── runner.py                # Runs enabled benchmarks at intervals
+│   ├── hellaswag.py             # HellaSwag (subsampled)
+│   ├── runner.py                # Runs enabled benchmarks
 │   └── __init__.py
 │
-├── callbacks/                   # Training lifecycle hooks
+├── callbacks/
 │   ├── base_callback.py
 │   ├── callback_handler.py
 │   ├── checkpoint_callback.py
 │   ├── wandb_callback.py
-│   ├── analysis_callback.py     # Periodic spectral/weight/activation logging
+│   ├── analysis_callback.py     # Periodic gradient/weight/spectral logging
 │   ├── benchmark_callback.py    # Periodic benchmark evaluation
 │   └── __init__.py
 │
@@ -84,7 +77,7 @@ src/tinyllm/
 │   └── __init__.py
 │
 ├── factory/
-│   ├── registry.py              # Shared MODEL_REGISTRY + LAYER_REGISTRY infrastructure
+│   ├── registry.py              # MODEL_REGISTRY infrastructure
 │   ├── factory.py               # model_factory, optimizer_factory, lr_scheduler_factory
 │   └── __init__.py
 │
@@ -97,7 +90,8 @@ src/tinyllm/
 └── utils/
     ├── misc.py                  # Config parser, tokenizer helper, exp path
     ├── train_utils.py           # AMP context helper
-    └── ww_utils.py              # WeightWatcher alpha computation (reference)
+    ├── kernels.py               # Optional liger-kernel / flash-attn integration
+    └── ww_utils.py              # WeightWatcher alpha (reference implementation)
 ```
 
 ## Core Design Principles
@@ -200,39 +194,86 @@ Three levels of tracking, all running at the same
 
 Each component logs its own timing to WandB so you can identify bottlenecks.
 
-### 6. Spectral Analysis (`analysis/spectral.py`)
+### 6. WeightWatcher Alpha (`analysis/spectral.py:compute_weightwatcher_alpha`)
 
-For a weight matrix W of shape (M, N):
+The WeightWatcher α (alpha) exponent measures the "heavy-tailedness" of a
+weight matrix's eigenvalue distribution. It is computed via the Hill estimator
+with KS-minimization on the empirical spectral density.
 
-```python
-U, S, Vt = torch.linalg.svd(W.float())
-evals = S ** 2
-total = evals.sum()
-ratio = evals.cumsum(0) / total
-n_95 = int((ratio < 0.95).sum()) + 1    # eigenvalues to explain 95% variance
-n_99 = int((ratio < 0.99).sum()) + 1    # eigenvalues to explain 99% variance
+**Interpretation of α:**
+
+| α range | Interpretation |
+|---------|---------------|
+| α < 2   | Very heavy-tailed. Many large eigenvalues → high redundancy / overfitting risk |
+| 2–4     | Reasonable fat tails. Healthy training signal |
+| 4–10    | Moderate tails. May be undertrained |
+| > 10    | Near-white-noise spectrum (random initialization). α ≈ 48 for randn(50304, 256) |
+| → ∞     | Perfect white noise, no learned structure |
+
+**What α reveals during training:**
+
+- **α decreasing over time** → the layer is learning meaningful structure
+- **α drops sharply** → possible phase transition or optimization instability
+- **α very low in early layers** → early layers specialize in general patterns
+- **α very low in late layers** → late layers overfit to training data
+- **α stays high** → the layer isn't learning effectively (dead layer, wrong LR, etc.)
+
+Monitor `spectral/{layer_name}/alpha` in WandB across training steps.
+
+### 7. Gradient Norm Tracking (`analysis/weight_stats.py:compute_gradient_norms`)
+
+Gradient norms are captured via **backward hooks** (not after zero_grad). Each
+parameter registers a hook during `backward()` that stores its gradient norm.
+At analysis time, the callback computes:
+
+- `gradients/global/gradient_norm`: L2 norm of all gradients (key metric)
+- `gradients/global/exploded_gradients`: count of params with grad norm > 1e4
+- `gradients/global/zero_gradients`: count of params with grad norm = 0
+- `gradients/layer/{name}`: per-parameter gradient norm
+
+**What to look for in WandB:**
+- **Exploding gradients**: `exploded_gradients > 0` → gradient clipping needed
+- **Vanishing gradients**: `global_gradient_norm` trending to 0 → activations dying
+- **Spiky gradient norm**: optimization instability, lower LR or increase warmup
+
+### 8. Flash Attention
+
+Two levels of flash attention support, controlled by the `flash` parameter
+in attention layer config:
+
+1. **PyTorch SDPA** (`flash: true`, default mechanism):
+   Uses `torch.nn.functional.scaled_dot_product_attention` with
+   `is_causal=True`. On CUDA with compatible GPUs, this automatically
+   dispatches to flash attention kernels (memory-efficient, O(1) in seq len).
+
+2. **flash-attn package** (optional, via `utils/kernels.py`):
+   The `flash_attn` package provides more flexible attention (sliding window,
+   ALiBi, etc.). Install with `pip install flash-attn` and use via the
+   kernel integration module.
+
+When `flash: true`, `attn_weights` is `None` in the metadata dict (the full
+attention matrix is never materialized). When `flash: false`, the full
+attention matrix is returned for analysis.
+
+### 9. Optional Triton Kernel Integration (`utils/kernels.py`)
+
+The `utils/kernels.py` module provides optional integration with:
+- **liger-kernel**: fused CrossEntropy, RoPE, SwiGLU, RMSNorm, LayerNorm
+- **flash-attn**: faster attention
+
+Both are optional (not in core requirements). Install with:
+```
+pip install liger-kernel flash-attn
 ```
 
-This directly measures activation/weight redundancy — if 95% variance is
-explained by 10% of eigenvalues, the matrix is highly redundant.
-
-### 7. Lightweight Benchmarks (`benchmarks/`)
-
-Benchmarks run every `benchmark_every_n_steps` with a small subsample:
-
-- **HellaSwag**: ~200 examples, ~10–20 seconds
-- Configurable per-benchmark: `num_samples`, `every_n_steps`
-
-Each benchmark implements the `BaseBenchmark` interface:
-
-```python
-class BaseBenchmark(ABC):
-    @abstractmethod
-    def run(self, model, tokenizer, device) -> dict:
-        """Returns {"accuracy": ..., "loss": ...}"""
+Set config:
+```yaml
+kernels:
+  use_flash_attn: true    # uses F.scaled_dot_product_attention
+  use_liger: true         # patches model with liger fused ops
 ```
 
-### 8. Dataset Design
+### 10. Dataset Design
 
 Currently supports two data sources, selected by config:
 
@@ -248,14 +289,25 @@ To switch datasets, change the training config (no code changes needed).
 ### New Attention Variant
 1. Create `layers/attention/my_attn.py`
 2. Decorate class with `@LAYER_REGISTRY.register("my_attn")`
-3. Return `(output, metadata_dict)` from `forward()`
-4. Reference it in config: `attention: "my_attn"`
+3. Implement `__init__(self, emb_dim, num_heads, drop_prob=0.0, flash=False, **kwargs)`
+4. Implement `forward(self, x, mask=None, cos=None, sin=None) -> (output, metadata_dict)`
+5. Reference it in config: `attention: "my_attn"`
+
+### New FFN Variant
+1. Create `layers/ffn/my_ffn.py`
+2. Decorate class with `@LAYER_REGISTRY.register("my_ffn")`
+3. Implement `__init__(self, emb_dim, ff_multiplier=4, drop_rate=0.0, **kwargs)`
+4. Implement `forward(self, x) -> Tensor`
+5. Reference it in config: `ffn: "my_ffn"`
+
+### New Model Architecture
+No Python code needed — just create a new YAML config combining existing layer types.
+Add a new config YAML under `configs/models/` and run with `model_type: "dynamic"`.
 
 ### New Benchmark
 1. Create `benchmarks/my_bench.py`
 2. Subclass `BaseBenchmark`, implement `run()`
 3. Add config entry in training YAML
-4. Register in `benchmarks/runner.py`
 
 ### New Dataset Source
 1. Implement a class that yields `(input_ids, targets, ...)` batches
@@ -266,19 +318,23 @@ To switch datasets, change the training config (no code changes needed).
 ### Model Config (e.g., `configs/models/gpt.yaml`)
 | Field | Type | Description |
 |-------|------|-------------|
-| `model_type` | str | Registered model name ("gpt", "qwen3") |
+| `model_type` | str | Must be `"dynamic"` |
 | `tokenizer_name` | str | HuggingFace tokenizer name |
 | `vocab_size` | int | Vocabulary size |
 | `d_model` | int | Model dimension |
 | `max_seq_len` | int | Maximum sequence length |
-| `embedding` | str | Embedding type ("learned_pe", "rope_only") |
+| `embedding` | str | `"learned_pe"`, `"rope_only"`, or `"sinusoidal"` |
 | `blocks.count` | int | Number of transformer layers |
-| `blocks.attention` | str | Attention type ("mha", "gqa") |
-| `blocks.ffn` | str | FFN type ("standard", "gated") |
-| `blocks.norm` | str | Normalization type ("layer_norm", "rms") |
+| `blocks.attention` | str | `"mha"` or `"gqa"` |
+| `blocks.ffn` | str | `"standard"` or `"gated"` |
+| `blocks.norm` | str | `"layer_norm"` or `"rms"` |
 | `blocks.num_heads` | int | Number of attention heads |
 | `blocks.num_kv_heads` | int | KV heads for GQA |
 | `blocks.ff_multiplier` | int | FFN hidden dim multiplier |
+| `blocks.flash` | bool | Use flash attention (default: false) |
+| `blocks.use_qk_norm` | bool | QK layer norm (default: false) |
+| `blocks.drop_prob` | float | Dropout probability |
+| `blocks.act_fn` | str | `"gelu"`, `"swish"`, or `"relu"` |
 | `head.norm` | str | Final norm type |
 | `head.tie_weights` | bool | Tie LM head with embedding |
 
@@ -286,14 +342,25 @@ To switch datasets, change the training config (no code changes needed).
 | Field | Type | Description |
 |-------|------|-------------|
 | `model_type` | str | Must match model config |
-| `mode` | str | "varlen_packed" or "fixed_batch" |
+| `mode` | str | `"varlen_packed"` or `"fixed_batch"` |
 | `train_file_pattern` | str | Glob for training shards |
 | `test_file_pattern` | str | Glob for validation shards |
-| `optimizer.type` | str | "muon_adamw" or "adamw" |
+| `optimizer.type` | str | `"muon_adamw"` or `"adamw"` |
+| `optimizer.muon_lr` | float | Learning rate for Muon params |
+| `optimizer.adamw_lr` | float | Learning rate for AdamW params |
+| `optimizer.muon_momentum` | float | Momentum for Muon (default: 0.95) |
+| `optimizer.weight_decay` | float | Weight decay |
 | `analysis.every_n_steps` | int | How often to run analysis |
+| `analysis.track_weights` | bool | Log weight statistics |
+| `analysis.track_gradients` | bool | Log gradient norms (via backward hooks) |
 | `analysis.spectral` | bool | Enable SVD-based spectral analysis |
-| `benchmarks` | dict | Per-benchmark config |
-| `lr_scheduler_type` | str | "cosine", "linear", "constant", etc. |
+| `analysis.track_alpha` | bool | Compute WeightWatcher alpha |
+| `analysis.variance_thresholds` | list | Variance thresholds for spectral (e.g. [0.95, 0.99]) |
+| `analysis.track_activations` | bool | Log activation statistics |
+| `benchmarks.<name>.enabled` | bool | Enable benchmark |
+| `benchmarks.<name>.num_samples` | int | Subsample size |
+| `benchmarks.<name>.every_n_steps` | int | Run interval |
+| `lr_scheduler_type` | str | `"cosine"`, `"linear"`, `"constant"`, etc. |
 
 ## Timing & Performance
 

@@ -1,19 +1,70 @@
 import time
 
+import torch
+
 from src.tinyllm.callbacks.base_callback import BaseCallback
 from src.tinyllm.logger.logger_utils import logger
 
 
-class AnalysisCallback(BaseCallback):
-    """
-    Runs weight stats, activation stats, and spectral analysis
-    at configurable intervals. Logs timing for each component.
-    """
+class GradientCapture:
+    """Captures per-parameter gradient norms during backward via hooks."""
 
+    def __init__(self, model):
+        self.norms = {}
+        self._handles = []
+
+        for name, p in model.named_parameters():
+            if p.requires_grad:
+                handle = p.register_hook(self._make_hook(name))
+                self._handles.append(handle)
+
+    def _make_hook(self, name):
+        def hook(grad):
+            self.norms[name] = grad.norm().item()
+
+        return hook
+
+    def compute_stats(self):
+        if not self.norms:
+            return {}
+
+        total = 0.0
+        n_zero = 0
+        n_exploded = 0
+        layer_norms = {}
+
+        for name, norm_val in self.norms.items():
+            layer_norms[name] = norm_val
+            total += norm_val**2
+            if norm_val == 0:
+                n_zero += 1
+            if norm_val > 1e4:
+                n_exploded += 1
+
+        total = total**0.5
+        return {
+            "global/gradient_norm": total,
+            "global/exploded_gradients": n_exploded,
+            "global/zero_gradients": n_zero,
+            "global/layers_with_grad": len(self.norms),
+            "_layer_norms": layer_norms,
+        }
+
+    def clear(self):
+        self.norms = {}
+
+    def remove(self):
+        for h in self._handles:
+            h.remove()
+        self._handles.clear()
+
+
+class AnalysisCallback(BaseCallback):
     def __init__(self, config: dict):
         super().__init__()
         self.every_n_steps = config.get("every_n_steps", 500)
         self.track_weights = config.get("track_weights", True)
+        self.track_gradients = config.get("track_gradients", True)
         self.track_activations = config.get("track_activations", False)
         self.track_spectral = config.get("spectral", False)
         self.variance_thresholds = config.get(
@@ -21,19 +72,22 @@ class AnalysisCallback(BaseCallback):
         )
         self.activation_captures = {}
         self._hooks = []
+        self._grad_capture = None
 
     def on_train_begin(self, **kwargs):
         model = kwargs.get("model")
-        if self.track_activations and model is not None:
+        if model is None:
+            return
+        if self.track_gradients:
+            self._grad_capture = GradientCapture(model)
+        if self.track_activations:
             self._register_activation_hooks(model)
 
     def _register_activation_hooks(self, model):
+        from src.tinyllm.analysis.activation_stats import ActivationCapture
+
         for name, module in model.named_modules():
             if "attn" in name and hasattr(module, "forward"):
-                from src.tinyllm.analysis.activation_stats import (
-                    ActivationCapture,
-                )
-
                 capture = ActivationCapture(name)
                 self.activation_captures[name] = capture
                 self._hooks.append(module.register_forward_hook(capture))
@@ -50,7 +104,20 @@ class AnalysisCallback(BaseCallback):
         log_dict = {}
         timing_log = {}
 
-        # 1. Weight stats
+        # 1. Gradient norms (captured during backward via hooks)
+        if self._grad_capture is not None:
+            t0 = time.perf_counter()
+            gstats = self._grad_capture.compute_stats()
+            timing_log["time/gradient_norms"] = time.perf_counter() - t0
+            for k, v in gstats.items():
+                if k in ("_layer_norms",):
+                    continue
+                log_dict[f"gradients/{k}"] = v
+            for name, norm_val in gstats.get("_layer_norms", {}).items():
+                log_dict[f"gradients/layer/{name}"] = norm_val
+            self._grad_capture.clear()
+
+        # 2. Weight stats
         if self.track_weights:
             from src.tinyllm.analysis.weight_stats import compute_weight_stats
 
@@ -64,7 +131,7 @@ class AnalysisCallback(BaseCallback):
                     if isinstance(v, (int, float)):
                         log_dict[f"weights/{name}/{k}"] = v
 
-        # 2. Activation stats
+        # 3. Activation stats
         if self.track_activations and self.activation_captures:
             from src.tinyllm.analysis.activation_stats import (
                 compute_activation_stats,
@@ -84,9 +151,12 @@ class AnalysisCallback(BaseCallback):
                         continue
                     log_dict[f"activations/{k}"] = v
 
-        # 3. Spectral analysis
+        # 4. Spectral analysis
         if self.track_spectral:
-            from src.tinyllm.analysis.spectral import compute_svd_and_variance
+            from src.tinyllm.analysis.spectral import (
+                compute_svd_and_variance,
+                compute_weightwatcher_alpha,
+            )
 
             t0 = time.perf_counter()
             for name, p in model.named_parameters():
@@ -104,13 +174,16 @@ class AnalysisCallback(BaseCallback):
                             ):
                                 continue
                             log_dict[f"{prefix}/{k}"] = v
+
+                        alpha = compute_weightwatcher_alpha(p)
+                        log_dict[f"{prefix}/alpha"] = alpha
                     except Exception as e:
                         logger.warning(
                             f"Spectral analysis failed for {name}: {e}"
                         )
             timing_log["time/spectral"] = time.perf_counter() - t0
 
-        # 4. Timing
+        # 5. Timing
         log_dict.update(timing_log)
         logger.info(
             f"Analysis at step {global_step}: "
@@ -129,3 +202,5 @@ class AnalysisCallback(BaseCallback):
         for hook in self._hooks:
             hook.remove()
         self._hooks.clear()
+        if self._grad_capture is not None:
+            self._grad_capture.remove()

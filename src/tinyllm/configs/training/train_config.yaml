@@ -40,8 +40,10 @@ resume_wandb_id: null
 analysis:
   every_n_steps: 500
   track_weights: true
+  track_gradients: true
   track_activations: false
   spectral: false
+  track_alpha: true
   variance_thresholds: [0.95, 0.99]
 
 benchmarks:

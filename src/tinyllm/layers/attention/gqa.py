@@ -5,8 +5,27 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from src.tinyllm.layers.registry import LAYER_REGISTRY
+from src.tinyllm.models.base import make_block_causal_mask
 from src.tinyllm.models.layers.rope import apply_rotary_pos_emb
 from src.tinyllm.models.layers.normalization import RMSNorm
+
+# Lazy flag — set once at first forward to avoid repeated failed imports
+_HAS_FLASH_ATTN_PKG: Optional[bool] = None
+
+
+def _check_flash_attn_pkg() -> bool:
+    global _HAS_FLASH_ATTN_PKG
+    if _HAS_FLASH_ATTN_PKG is None:
+        try:
+            import flash_attn  # noqa: F401
+
+            _HAS_FLASH_ATTN_PKG = True
+        except ImportError:
+            print(
+                "flash_attn package not found. Flash attention will not be used."
+            )
+            _HAS_FLASH_ATTN_PKG = False
+    return _HAS_FLASH_ATTN_PKG
 
 
 @LAYER_REGISTRY.register("gqa")
@@ -59,6 +78,7 @@ class GQA(nn.Module):
         mask: Optional[torch.Tensor] = None,
         cos: Optional[torch.Tensor] = None,
         sin: Optional[torch.Tensor] = None,
+        cu_seqlens: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, dict]:
         b, s, _ = x.shape
 
@@ -85,28 +105,53 @@ class GQA(nn.Module):
             k_norm_out = self.k_norm(k)
             q, k = q_norm_out, k_norm_out
 
-        if self.flash:
-            if self.num_groups > 1:
-                k = k.repeat_interleave(self.num_groups, dim=1)
-                v = v.repeat_interleave(self.num_groups, dim=1)
+        # Expand kv heads for equivalent full-head computation
+        if self.num_groups > 1:
+            k = k.repeat_interleave(self.num_groups, dim=1)
+            v = v.repeat_interleave(self.num_groups, dim=1)
+
+        B, H, S, D = q.shape
+
+        if self.flash and cu_seqlens is not None and _check_flash_attn_pkg():
+            # ---- flash_attn varlen API (requires flash-attn package) ----
+            from flash_attn import flash_attn_varlen_func
+
+            q_flat = q.transpose(1, 2).reshape(-1, H, D)
+            k_flat = k.transpose(1, 2).reshape(-1, H, D)
+            v_flat = v.transpose(1, 2).reshape(-1, H, D)
+
+            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
+
+            attn_out = flash_attn_varlen_func(
+                q_flat,
+                k_flat,
+                v_flat,
+                cu_seqlens,
+                cu_seqlens,
+                max_seqlen,
+                max_seqlen,
+                dropout_p=self.dropout.p if self.training else 0.0,
+                softmax_scale=self.head_dim**-0.5,
+                causal=True,
+            )
+            attn_out = attn_out.reshape(B, S, H, D).transpose(1, 2)
+            attn_weights = None
+        else:
+            # ---- F.scaled_dot_product_attention with optional block mask ----
+            if cu_seqlens is not None:
+                attn_mask = make_block_causal_mask(cu_seqlens)
+            else:
+                attn_mask = None
+
             attn_out = F.scaled_dot_product_attention(
                 q,
                 k,
                 v,
-                attn_mask=None,
+                attn_mask=attn_mask,
                 dropout_p=self.dropout.p if self.training else 0.0,
-                is_causal=True,
+                is_causal=attn_mask is None,
             )
             attn_weights = None
-        else:
-            if self.num_groups > 1:
-                k = k.repeat_interleave(self.num_groups, dim=1)
-                v = v.repeat_interleave(self.num_groups, dim=1)
-            scores = (q @ k.transpose(-2, -1)) * (self.head_dim**-0.5)
-            if mask is not None:
-                scores = scores + mask
-            attn_weights = torch.softmax(scores, dim=-1)
-            attn_out = self.dropout(attn_weights) @ v
 
         attn_out = attn_out.transpose(1, 2).contiguous().view(b, s, -1)
         o_proj_output = self.o_proj(attn_out)

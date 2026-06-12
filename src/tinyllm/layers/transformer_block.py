@@ -60,8 +60,15 @@ class TransformerBlock(nn.Module):
         mask: Optional = None,
         cos: Optional = None,
         sin: Optional = None,
+        cu_seqlens: Optional = None,
     ):
-        attn_out, _ = self.attn(self.attn_norm(x), mask=mask, cos=cos, sin=sin)
+        attn_out, _ = self.attn(
+            self.attn_norm(x),
+            mask=mask,
+            cos=cos,
+            sin=sin,
+            cu_seqlens=cu_seqlens,
+        )
         x = x + attn_out
         x = x + self.ffn(self.ffn_norm(x))
         return x

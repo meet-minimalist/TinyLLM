@@ -1,15 +1,37 @@
-datasets>=2.20.0
+# ==============================================================================
+# 1. REPOSITORY INDEX ROUTING
+# ==============================================================================
+--index-url https://download.pytorch.org/whl/cu130
+--extra-index-url https://pypi.org/simple
+
+# ==============================================================================
+# 2. CORE DEEP LEARNING FRAMEWORKS (PyTorch Ecosystem)
+# ==============================================================================
+torch==2.11.0+cu130
+torchvision==0.26.0
+torchaudio==2.11.0
+
+# ==============================================================================
+# 3. PLATFORM SPECIFIC DEPENDENCIES (Windows vs. Linux)
+# ==============================================================================
+# Triton Engine
+triton-windows>=3.7.0 ; sys_platform == 'win32'
+triton>=3.7.0         ; sys_platform == 'linux'
+
+# Flash Attention 
+# Windows (Fixed: direct download link with '/resolve/' instead of website '/blob/')
+https://huggingface.co/Sumitc13/flash-attn-windows-wheels/resolve/main/flash_attn-2.8.3%2Bcu130torch2.11-cp312-cp312-win_amd64.whl ; sys_platform == 'win32' and python_version == '3.12'
+# Linux (Natively handles direct compilation via standard PyPI)
+flash-attn==2.8.3     ; sys_platform == 'linux'
+
+# ==============================================================================
+# 4. STANDARD UTILITIES & ECOSYSTEM LIBRARIES
+# ==============================================================================
+datasets>=5.0.0
 numpy>=1.24.1
+python-box
 tabulate>=0.9.0
-torch>=2.9.0+cu126
 torchinfo>=1.8.0
 tqdm>=4.66.5
 transformers>=4.43.4
 wandb>=0.19.8
-python-box
-
-# Optional: flash attention (faster attention on CUDA)
-# flash-attn>=2.6.0
-
-# Optional: liger-kernel (fused Triton kernels for CE, RoPE, LayerNorm, SwiGLU)
-# liger-kernel>=0.5.0

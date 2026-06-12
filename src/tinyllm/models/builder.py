@@ -4,6 +4,7 @@ import torch.nn as nn
 from src.tinyllm.layers.registry import LAYER_REGISTRY
 from src.tinyllm.layers.transformer_block import TransformerBlock
 from src.tinyllm.models.base import BaseLLM
+from src.tinyllm.models.layers.rope import RotaryPositionalEmbedding
 from src.tinyllm.factory.registry import MODEL_REGISTRY
 
 
@@ -27,6 +28,8 @@ class DynamicModel(BaseLLM):
         d_model = cfg["d_model"]
         vocab_size = cfg["vocab_size"]
         max_seq_len = cfg["max_seq_len"]
+        blocks_cfg = _first_key(cfg, "blocks", default={})
+        num_heads = _first_key(blocks_cfg, "num_heads", default=4)
 
         self.token_embedding = nn.Embedding(vocab_size, d_model)
 
@@ -36,7 +39,14 @@ class DynamicModel(BaseLLM):
             max_seq_len=max_seq_len, emb_dim=d_model
         )
 
-        blocks_cfg = _first_key(cfg, "blocks", default={})
+        if embed_type == "rope_only":
+            head_dim = d_model // num_heads
+            self.rope = RotaryPositionalEmbedding(
+                head_dim=head_dim, max_seq_len=max_seq_len
+            )
+        else:
+            self.rope = None
+
         ff_mult = _first_key(
             blocks_cfg, "ff_multiplier", "ffn_multiplier", default=4
         )
@@ -83,18 +93,16 @@ class DynamicModel(BaseLLM):
 
         self.apply(self._init_weights)
 
-    def forward(self, input_ids, mask=None):
+    def forward(self, input_ids, mask=None, cu_seqlens=None):
         x = self.token_embedding(input_ids)
         x = self.position_embedding(x)
 
-        seq_len = input_ids.shape[1]
-        causal = self._causal_mask(seq_len, x.device)
-        if mask is not None:
-            mask = mask.unsqueeze(1).unsqueeze(2).to(torch.float32)
-            mask = (1.0 - mask) * torch.finfo(torch.float32).min
-            causal = causal + mask
+        if self.rope is not None:
+            cos, sin = self.rope(x, seq_len=x.shape[1])
+        else:
+            cos, sin = None, None
 
         for block in self.transformer_blocks:
-            x = block(x, causal)
+            x = block(x, mask=mask, cos=cos, sin=sin, cu_seqlens=cu_seqlens)
 
         return self.lm_head(self.final_norm(x))

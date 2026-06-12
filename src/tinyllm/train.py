@@ -1,4 +1,7 @@
 import argparse
+import os
+
+from dotenv import load_dotenv
 
 import torch
 
@@ -20,6 +23,8 @@ from src.tinyllm.factory.factory import (
     lr_scheduler_factory,
 )
 
+load_dotenv()
+
 
 def run(args):
     model_config = Config.parse(args.model_config_path)
@@ -28,9 +33,15 @@ def run(args):
     exp_path, log_file = get_exp_path(train_config.exp_path)
     configure_logging(log_file)
 
+    packed = train_config.get("packed_tokens", 8192)
+    assert model_config.max_seq_len >= packed, (
+        f"model max_seq_len ({model_config.max_seq_len}) must be >= "
+        f"training packed_tokens ({packed}). "
+        f"The position embedding needs at least packed_tokens positions."
+    )
     assert (
         model_config.max_seq_len == train_config.max_seq_len
-    ), "model_config.max_seq_len must equal train_config.max_seq_len"
+    ), f"model max_seq_len ({model_config.max_seq_len}) must equal train_config max_seq_len ({train_config.max_seq_len})"
     assert not (
         train_config.device == "cpu"
         and getattr(train_config, "fp16_training", False)

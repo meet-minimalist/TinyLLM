@@ -147,14 +147,24 @@ def build_muon_adamw_optimizer(
     return _CombinedOptimizer(muon_opt, adamw_opt)
 
 
-class _CombinedOptimizer:
+class _CombinedOptimizer(torch.optim.Optimizer):
+    """
+    Combines Muon (2D weights) and AdamW (1D/biases/embeddings/norms).
+    Subclasses torch.optim.Optimizer so it passes isinstance() checks
+    required by lr_schedulers (LambdaLR, CosineWarmup, etc.).
+
+    The param_groups reference the SAME dict objects as the internal
+    optimizers, so lr_scheduler modifications propagate correctly.
+    """
+
     def __init__(self, muon_opt, adamw_opt):
         self.muon = muon_opt
         self.adamw = adamw_opt
-
-    @property
-    def param_groups(self):
-        return self.muon.param_groups + self.adamw.param_groups
+        # super().__init__ validates param groups and sets up self.state
+        super().__init__(muon_opt.param_groups + adamw_opt.param_groups, {})
+        # Use ORIGINAL param_group dicts so lr changes propagate to
+        # the internal optimizers (add_param_group shallow-copies)
+        self.param_groups = muon_opt.param_groups + adamw_opt.param_groups
 
     def step(self, closure=None):
         self.muon.step(closure)

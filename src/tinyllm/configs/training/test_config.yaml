@@ -2,8 +2,8 @@ model_type: "dynamic"
 exp_path: "test_run"
 
 mode: "varlen_packed"
-train_file_pattern: "C:/path/to/fineweb_train_*.bin"
-test_file_pattern: "C:/path/to/fineweb_val_*.bin"
+train_file_pattern: "D:/d/DeepLearning/datasets/fineweb10b-pretokenized/fineweb_train_*.bin"
+test_file_pattern: "D:/d/DeepLearning/datasets/fineweb10b-pretokenized/fineweb_val_*.bin"
 num_workers: 0
 prefetch_factor: 2
 

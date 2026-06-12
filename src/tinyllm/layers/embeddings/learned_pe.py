@@ -13,7 +13,11 @@ class LearnablePositionalEmbeddings(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         seq_len = x.shape[1]
-        assert (
-            seq_len <= self.max_seq_len
-        ), f"Sequence length {seq_len} exceeds max_seq_len {self.max_seq_len}"
+        if seq_len > self.max_seq_len:
+            raise RuntimeError(
+                f"Sequence length {seq_len} exceeds position embedding "
+                f"max_seq_len={self.max_seq_len}. "
+                "Check that train_config.packed_tokens and model_config.max_seq_len "
+                "are consistent."
+            )
         return x + self.pos_emb[:, :seq_len, :]

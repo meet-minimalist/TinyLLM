@@ -125,11 +125,24 @@ class Trainer:
 
     def _epoch_train(self):
         self.model.train()
+        # IterableDataset has no __len__; use max_batches from config if available
+        try:
+            total = len(self.train_loader)
+        except TypeError:
+            total = self.train_config.get("max_batches", 0) or 1_000_000_000
+            if total == 1_000_000_000:
+                total = self.train_config.get(
+                    "num_training_steps", 1_000_000_000
+                )
         for batch_idx, batched_input in enumerate(self.train_loader):
-            self._step_train(batched_input, batch_idx, len(self.train_loader))
+            self._step_train(batched_input, batch_idx, total)
 
     def _step_train(self, batched_input, batch_idx, total_batches):
-        inputs, targets, cu_seq_len = batched_input
+        if len(batched_input) == 3:
+            inputs, targets, cu_seqlens = batched_input
+        else:
+            inputs, targets = batched_input
+            cu_seqlens = None
 
         self.callback_handler.on_train_step_begin(
             global_step=self.global_step,
@@ -138,7 +151,7 @@ class Trainer:
 
         autocast_ctx = get_autocast_ctx(self.device, self.use_amp)
         with autocast_ctx:
-            logits = self.model(inputs)
+            logits = self.model(inputs, cu_seqlens=cu_seqlens)
             loss = compute_ce_loss(
                 logits,
                 targets,
@@ -204,13 +217,18 @@ class Trainer:
         total_loss = 0.0
         n_steps = 0
         with torch.no_grad():
-            for input_ids, attn_mask, labels in self.test_loader:
-                input_ids = input_ids.to(self.device, non_blocking=True)
-                attn_mask = attn_mask.to(self.device, non_blocking=True)
-                labels = labels.to(self.device, non_blocking=True)
-                logits = self.model(input_ids)
+            for batched_input in self.test_loader:
+                # Unpack: varlen -> (inputs, targets, cu_seqlens), fixed -> (inputs, targets)
+                if len(batched_input) == 3:
+                    inputs, targets, cu_seqlens = batched_input
+                else:
+                    inputs, targets = batched_input
+                    cu_seqlens = None
+                inputs = inputs.to(self.device, non_blocking=True)
+                targets = targets.to(self.device, non_blocking=True)
+                logits = self.model(inputs, cu_seqlens=cu_seqlens)
                 loss = compute_ce_loss(
-                    logits, labels, 0.0, self.tokenizer.pad_token_id
+                    logits, targets, 0.0, self.tokenizer.pad_token_id
                 )
                 total_loss += loss.item()
                 n_steps += 1

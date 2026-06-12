@@ -1,197 +1,267 @@
 # TinyLLMs
 
-Lightweight, from-scratch implementations of popular LLM architectures for research and learning. Build models like GPT-2, Qwen, LLaMA, and Mistral from YAML configs using a unified, modular building-block system.
+Lightweight, from-scratch LLM training framework with a **single config-driven model** that supports any decoder-only architecture (GPT, Qwen, LLaMA, etc.) via YAML. Built for the FineWeb10B pretokenized dataset with GPT-2 tokenizer.
 
 ## Quick Start
 
 ```bash
-# Train GPT on TinyStories
+# Train a GPT-style model on FineWeb10B
 python -m src.tinyllm.train \
     -c src/tinyllm/configs/training/train_config.yaml \
     -m src/tinyllm/configs/models/gpt.yaml
 
-# Inference with a trained checkpoint
-python -m src.tinyllm.infer \
-    -m src/tinyllm/configs/models/gpt.yaml \
-    -c checkpoints/model.pt \
-    -p "Once upon a time" \
-    --max_tokens 100
+# Train a Qwen3-style model (same tokenizer/vocab, different architecture)
+python -m src.tinyllm.train \
+    -c src/tinyllm/configs/training/train_config.yaml \
+    -m src/tinyllm/configs/models/qwen3.yaml
 ```
 
 ## Installation
 
 ```bash
+# Create environment (Python 3.11+)
+python -m venv .venv
+.venv\Scripts\activate
+
+# Install dependencies
 pip install -r requirements.txt
+
+# Optional: flash-attn for variable-length varlen
+pip install flash-attn
+
+# Optional: liger-kernel for fused Triton kernels
+pip install liger-kernel
 ```
+
+### Environment Variables
+
+Create `.env` at the project root:
+
+```env
+WANDB_API_KEY=your-wandb-key
+HF_TOKEN=your-huggingface-token  # only needed for gated models
+```
+
+## Data
+
+Uses the [FineWeb10B GPT-2 pretokenized dataset](https://huggingface.co/datasets/kjj0/fineweb10B-gpt2).
+
+```bash
+# Download validation chunk + 1 training chunk
+python -m src.tinyllm.utils.fineweb10b_downloader 1
+```
+
+Then update `train_file_pattern` / `test_file_pattern` in your training config to point to the `.bin` files.
 
 ## Architecture
-
-Models are assembled from reusable, composable building blocks. A single unified `TransformerBlock` handles all architecture variants through a config dict:
-
-```yaml
-# GPT-2 style
-attention_type: "mha"
-ffn_type: "standard"
-normalization: "layer_norm"
-
-# Qwen / LLaMA style
-attention_type: "gqa"
-ffn_type: "gated"
-normalization: "rms"
-```
 
 ```
 src/tinyllm/
 ├── train.py                  # Training entry point
-├── infer.py                  # Inference entry point
-├── callbacks/                # Checkpoint, WandB lifecycle hooks
 ├── configs/
 │   ├── models/               # Model architecture YAMLs
-│   │   ├── gpt.yaml
-│   │   └── qwen3.yaml
+│   │   ├── gpt.yaml          # MHA + StandardFFN + LayerNorm
+│   │   └── qwen3.yaml        # GQA + GatedFFN + RMSNorm + RoPE
 │   └── training/             # Training hyperparameter YAMLs
-├── datasets/                 # Dataset loading + bucketed batching
-├── factory/                  # Model & LR scheduler registry
-├── logger/                   # Logging utilities
-├── loss_fn/                  # Cross-entropy loss helpers
 ├── models/
-│   ├── gpt.py                # GPT model (thin config wrapper)
-│   ├── qwen3.py              # Qwen3 model (thin config wrapper)
-│   └── layers/               # Reusable building blocks
-│       ├── transformer_block.py   # Single unified decoder block
-│       ├── embeddings.py          # Learnable + sinusoidal PE
-│       ├── rope.py                # Rotary Positional Embeddings
-│       ├── normalization.py       # RMSNorm
-│       └── generate_qkv.py        # Q/K/V projection
-├── trainer/                  # Training loop with AMP + grad accum
-└── utils/                    # Config parsing, tokenizer, misc
+│   ├── builder.py            # DynamicModel — single class, all architectures
+│   ├── base.py               # Weight init, causal mask, block-causal mask
+│   └── layers/
+│       ├── transformer_block.py  # Single block, resolves attn/ffn/norm from registry
+│       ├── rope.py               # Rotary Positional Embeddings
+│       ├── generate_qkv.py       # Fused QKV projection
+│       └── normalization.py      # LayerNorm, RMSNorm
+├── layers/
+│   ├── registry.py           # LAYER_REGISTRY for all components
+│   ├── attention/
+│   │   ├── mha.py            # Multi-Head Attention (cu_seqlens + flash support)
+│   │   └── gqa.py            # Grouped Query Attention (cu_seqlens + flash support)
+│   ├── ffn/
+│   │   ├── standard.py       # Linear → Activation → Linear
+│   │   └── gated.py          # SwiGLU/GeGLU gated FFN
+│   ├── normalization/
+│   │   ├── layer_norm.py     # nn.LayerNorm wrapper
+│   │   └── rms_norm.py       # RMSNorm
+│   └── embeddings/
+│       ├── learned_pe.py     # Learned positional embeddings
+│       ├── sinusoidal_pe.py  # Sinusoidal positional embeddings
+│       └── rope_only.py      # No-op (RoPE handled inside attention)
+├── datasets/
+│   └── fineweb_helper.py     # Varlen-packed + fixed-batch dataloader for .bin files
+├── trainer/
+│   └── trainer.py            # Training loop with AMP, grad accum, cu_seqlens
+├── optimizer/
+│   └── muon.py               # Muon optimizer + Muon-AdamW hybrid
+├── analysis/
+│   ├── spectral.py           # SVD, variance explained, WeightWatcher alpha
+│   ├── weight_stats.py       # Weight mean/std/min/max/L2/sparsity
+│   └── activation_stats.py   # Activation capture + stats
+├── callbacks/
+│   ├── wandb_callback.py     # WandB logging (config, metrics, watch)
+│   ├── analysis_callback.py  # Gradient/weight/spectral/activation analysis
+│   ├── benchmark_callback.py # HellaSwag eval
+│   └── checkpoint_callback.py# Checkpoint save/load
+├── benchmarks/
+│   ├── hellaswag.py          # HellaSwag evaluation
+│   ├── base.py               # Benchmark base class
+│   └── runner.py             # Benchmark runner
+├── factory/
+│   ├── factory.py            # model_factory, optimizer_factory, lr_scheduler_factory
+│   └── registry.py           # MODEL_REGISTRY
+└── utils/
+    ├── misc.py               # Config parser (Box), tokenizer, path helpers
+    ├── kernels.py            # liger-kernel + flash-attn integration
+    ├── train_utils.py        # autocast context
+    └── fineweb10b_downloader.py  # FineWeb10B .bin downloader
+```
+
+## Model Config
+
+All architectures use the same `dynamic` model type. What changes is the `blocks` section:
+
+### GPT-style (MHA + StandardFFN + LayerNorm + RoPE)
+
+```yaml
+model_type: "dynamic"
+tokenizer_name: "gpt2"
+d_model: 256
+vocab_size: 50304            # GPT-2 vocab (50257) padded to nearest 64
+max_seq_len: 1024
+embedding: "rope_only"       # RoPE inside attention, no learned position table
+
+blocks:
+  count: 4
+  attention: "mha"
+  ffn: "standard"
+  norm: "layer_norm"
+  num_heads: 4
+  ff_multiplier: 4
+  flash: false               # use flash_attn varlen if true + package installed
+
+head:
+  norm: "layer_norm"
+  tie_weights: true
+```
+
+### Qwen3-style (GQA + GatedFFN + RMSNorm + RoPE)
+
+```yaml
+model_type: "dynamic"
+tokenizer_name: "gpt2"       # same tokenizer, same vocab
+d_model: 256
+vocab_size: 50304
+max_seq_len: 1024
+embedding: "rope_only"
+
+blocks:
+  count: 4
+  attention: "gqa"
+  ffn: "gated"
+  norm: "rms"
+  num_heads: 8
+  num_kv_heads: 2
+  ff_multiplier: 4
+  use_qk_norm: true
+
+head:
+  norm: "rms"
+  tie_weights: true
+```
+
+## Training Config
+
+```yaml
+model_type: "gpt"
+exp_path: "gpt_training"
+mode: "varlen_packed"            # or "fixed_batch"
+train_file_pattern: "data/fineweb_train_*.bin"
+test_file_pattern: "data/fineweb_val_*.bin"
+
+packed_tokens: 1024              # tokens per batch (must match model max_seq_len)
+max_seq_len: 1024
+device: "cuda:0"
+
+optimizer:
+  type: "muon_adamw"             # Muon for 2D, AdamW for 1D/biases/norms
+  muon_lr: 0.0002
+  adamw_lr: 0.001
+  weight_decay: 0.1
+
+init_lr: 0.001
+num_training_steps: 100_000
+lr_scheduler_type: "cosine"
+
+fp16_training: true
+use_grad_accum: true
+iters_to_accumulate: 4
+
+use_wandb: true
+log_every: 10
+
+max_batches: 0                   # limit for testing (0 = unlimited)
+max_tokens: 0
+
+analysis:
+  every_n_steps: 500
+  track_weights: true
+  track_gradients: true
+  spectral: false
+
+kernels:
+  use_liger: false               # requires: pip install liger-kernel
+  use_flash_attn: false          # requires: pip install flash-attn
 ```
 
 ## Features
 
-### Models & Architectures
-- [x] GPT-2 style decoder-only transformer
-- [x] Qwen3 / LLaMA style with GQA + RoPE + SwiGLU
-- [x] Unified `TransformerBlock` — one class for all architecture variants
-- [x] Config-driven model construction from YAML
+### Dynamic Model
+- Single `DynamicModel` class reads any architecture from YAML config
+- No per-model Python files — all variants via config
+- `LAYER_REGISTRY` resolves attention, FFN, norm, embedding by name
 
-### Attention Mechanisms
-- [x] Multi-Head Attention (MHA)
-- [x] Grouped Query Attention (GQA)
-- [x] Rotary Positional Embeddings (RoPE)
-- [x] Learnable positional embeddings
-- [x] Sinusoidal positional embeddings
-- [x] Causal masking
-- [x] Optional QK normalization
+### Attention (two paths)
+- **No flash** (`flash: false`): `F.scaled_dot_product_attention` with block-diagonal causal mask built from `cu_seqlens` — correct document-boundary masking in varlen mode
+- **flash-attn package** (`flash: true` + `pip install flash-attn`): `flash_attn_varlen_func` with native varlen support
 
-### Feed-Forward Networks
-- [x] Standard FFN (Linear → Activation → Linear)
-- [x] Gated FFN (SwiGLU / GeGLU)
-- [x] Configurable activation functions (GELU, ReLU, SiLU)
+### Optimizer
+- **Muon**: Newton-Schulz preconditioning for 2D weight matrices
+- **AdamW**: all 1D / bias / norm / embedding parameters
+- `_CombinedOptimizer` wraps both as a single `torch.optim.Optimizer` (compatible with LR schedulers)
 
-### Normalization
-- [x] Layer Normalization
-- [x] RMSNorm
+### Data Pipeline
+- Varlen-packed mode: documents concatenated into fixed-length batches with `cu_seqlens`
+- Fixed-batch mode: traditional `(B, S)` batches
+- Memory-mapped I/O, async BOS scanning, configurable limits (`max_batches`, `max_tokens`)
 
-### Training
-- [x] Config-driven training from YAML
-- [x] Automatic mixed precision (AMP / FP16)
-- [x] Gradient accumulation
-- [x] Cosine, linear, constant, inverse-sqrt LR schedulers with warmup
-- [x] Label smoothing
-- [x] Bucketed batching (group similar-length sequences)
-- [x] Cross-entropy loss with ignore index
+### Analysis & Observability
+- **WandB**: loss, LR, tokens/sec each step; weight histograms every 100 steps
+- **Weight stats**: mean, std, min, max, L2, sparsity per parameter
+- **Gradient norms**: per-parameter via backward hooks (captured before zero_grad)
+- **Spectral analysis**: SVD, variance explained ratio, condition number
+- **WeightWatcher alpha**: heavy-tailedness metric (α < 2 = redundant, α > 10 = near-white-noise)
+- **Timing**: per-analysis latency logged to WandB
+- **HellaSwag**: periodic evaluation benchmark
 
-### Observability
-- [x] Weights & Biases integration
-- [x] File-based logging
-- [x] Model summary (torchinfo)
-- [x] Checkpoint management (keep last N)
+### Testing
 
-### Inference
-- [x] Autoregressive token-by-token generation
-- [x] Checkpoint loading
+```bash
+# Quick smoke test on random data (no download needed)
+python -m src.tinyllm.test_run
 
-## Usage
-
-### Define a Model
-
-Create a YAML file in `configs/models/`:
-
-```yaml
-model_type: "gpt"
-tokenizer_name: "gpt2"
-
-vocab_size: 50304
-emb_dim: 768
-max_seq_len: 1024
-num_heads: 12
-drop_prob: 0.1
-ff_multiplier: 4
-num_blocks: 12
-tie_weights: true
-act_fn: "gelu"
+# Limited data test
+# Add to train_config.yaml:
+#   max_batches: 5
+#   max_tokens: 50000
 ```
 
-Or for a Qwen3-style model:
+## Key Design Decisions
 
-```yaml
-model_type: "qwen3"
-tokenizer_name: "Qwen/Qwen2.5-0.5B"
-
-d_model: 768
-vocab_size: 50304
-max_seq_len: 2048
-num_layers: 12
-num_heads: 12
-num_kv_heads: 4
-drop_rate: 0.1
-ffn_multiplier: 4
-tie_word_embeddings: true
-use_qk_norm: true
-ffn_act: "swish"
-```
-
-### Define Training Config
-
-```yaml
-model_type: "gpt"
-exp_path: "experiments"
-num_epochs: 10
-batch_size: 32
-max_seq_len: 1024
-dataset_name: "roneneldan/TinyStories"
-lr_scheduler_type: "cosine"
-init_lr: 3e-4
-warmup_epochs: 1
-device: "cuda:0"
-fp16_training: true
-use_grad_accum: true
-iters_to_accumulate: 4
-use_wandb: true
-```
-
-### Register a Custom Model
-
-```python
-from src.tinyllm.factory.registry import MODEL_REGISTRY
-from src.tinyllm.models.layers import TransformerBlock, RMSNorm, RotaryPositionalEmbedding
-
-@MODEL_REGISTRY.register("my_model")
-class MyModel(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        # Assemble from building blocks
-        self.blocks = nn.ModuleList([
-            TransformerBlock(config) for _ in range(config.num_layers)
-        ])
-```
-
-## TODO
-
-- [ ] Flash Attention integration
-- [ ] Mistral / Sliding Window Attention
-- [ ] Mixture of Experts (MoE)
-- [ ] Evaluation harness (MMLU, HellaSwag, etc.)
-- [ ] Pretraining on larger datasets (FineWeb, Dolma)
-- [ ] Resume training from checkpoint
+| Decision | Choice |
+|---|---|
+| Single model class vs per-model files | `DynamicModel` only — `gpt.py` and `qwen3.py` deleted |
+| Attention return convention | Always `(output, metadata_dict)` with q, k, v, attn_weights (or None if flash), qkv_out, o_proj_out |
+| Gradient capture | `register_hook` on each param (fires during backward, stored before zero_grad) |
+| Embedding for varlen | `rope_only` — no learned position table; RoPE applied inside attention per-document |
+| Tokenizer | GPT-2 for all architectures (FineWeb10B is GPT-2 pretokenized) |
+| Vocab size | 50304 = GPT-2's 50257 padded to nearest multiple of 64 |
+| Positional encoding | RoPE applied per-document inside attention layers |

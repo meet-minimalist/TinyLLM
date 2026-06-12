@@ -63,6 +63,16 @@ def _patch_liger(model: nn.Module) -> nn.Module:
 
 def _patch_attention_flash(model: nn.Module):
     """Sets flash=True on all attention modules in the model."""
+    has_pkg = False
+    try:
+        import flash_attn  # noqa: F401
+
+        has_pkg = True
+    except ImportError:
+        print("flash_attn package not found. Flash attention will not be used.")
+        pass
+    if not has_pkg:
+        return
     for module in model.modules():
         if hasattr(module, "flash"):
             module.flash = True

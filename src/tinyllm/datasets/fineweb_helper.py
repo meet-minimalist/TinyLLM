@@ -69,7 +69,7 @@ def _read_tokens_slice(
 ) -> torch.Tensor:
     """Zero-copy disk read for a specific token range."""
     if start_idx >= end_idx:
-        return torch.empty(0, dtype=torch.uint16)
+        return torch.empty(0, dtype=torch.long)
 
     file = shard["path"]
     offset = HEADER_SIZE * 4 + start_idx * 2  # 2 bytes per uint16
@@ -77,10 +77,11 @@ def _read_tokens_slice(
 
     with file.open("rb", buffering=0) as f:
         f.seek(offset)
-        # Allocate on CPU, pin if targeting GPU later
-        tokens = torch.empty(num_tokens, dtype=torch.uint16)
-        nbytes = f.readinto(tokens.numpy())
+        # Read as uint16 then convert to long for Embedding compatibility
+        buf = torch.empty(num_tokens, dtype=torch.uint16)
+        nbytes = f.readinto(buf.numpy())
         assert nbytes == 2 * num_tokens, "read size mismatch"
+        tokens = buf.to(torch.long)
     return tokens
 
 
@@ -214,18 +215,24 @@ class NanoGPTDataset(IterableDataset):
                 inputs = buf[:-1]
                 targets = buf[1:]
 
-                # Build cu_seqlens
+                # Build cu_seqlens (reflects buf length = packed_tokens+1)
                 cum_len = [0]
                 for s, e in zip(starts, ends):
                     cum_len.append(cum_len[-1] + (e - s))
                 cu_seqlens = torch.tensor(
                     cum_len, dtype=torch.int32, pin_memory=True
                 )
+                # Clamp to input length (inputs = buf[:-1], removing the +1 shift token)
+                cu_seqlens = cu_seqlens.clamp(max=inputs.shape[0])
+
+                # Add batch dim for model compatibility
+                inputs = inputs.unsqueeze(0)
+                targets = targets.unsqueeze(0)
 
                 # Move to device
                 dev = self.cfg.device
                 self._batch_count += 1
-                self._token_count += inputs.shape[0]
+                self._token_count += inputs.shape[-1]
                 yield (
                     inputs.to(dev, non_blocking=True),
                     targets.to(dev, non_blocking=True),
@@ -308,7 +315,7 @@ if __name__ == "__main__":
 
     train_cfg = DataLoaderConfig(
         mode="varlen_packed",
-        file_pattern="/mnt/d/d/DeepLearning/datasets/fineweb10b-pretokenized/fineweb_train_*.bin",
+        file_pattern="D:/d/DeepLearning/datasets/fineweb10b-pretokenized/fineweb_val_*.bin",
         device="cuda",
         packed_tokens=8192,
         max_seq_len=2048,

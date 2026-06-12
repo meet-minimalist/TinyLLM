@@ -2,12 +2,12 @@ model_type: "gpt"
 exp_path: "gpt_training"
 
 mode: "varlen_packed"
-train_file_pattern: "/mnt/d/d/DeepLearning/datasets/fineweb10b-pretokenized/fineweb_train_*.bin"
-test_file_pattern: "/mnt/d/d/DeepLearning/datasets/fineweb10b-pretokenized/fineweb_val_*.bin"
+train_file_pattern: "D:/d/DeepLearning/datasets/fineweb10b-pretokenized/fineweb_train_*.bin"
+test_file_pattern: "D:/d/DeepLearning/datasets/fineweb10b-pretokenized/fineweb_val_*.bin"
 num_workers: 8
 prefetch_factor: 4
 
-packed_tokens: 8192
+packed_tokens: 1024  # must match model max_seq_len for learned PE
 max_seq_len: 1024
 
 device: "cuda:0"

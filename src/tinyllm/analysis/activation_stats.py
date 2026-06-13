@@ -24,12 +24,14 @@ class ActivationCapture:
         if self.call_count % self.capture_freq != 0:
             return
 
-        _, metadata = output
-        self.captured = {
-            k: v.detach()
-            for k, v in metadata.items()
-            if isinstance(v, torch.Tensor)
-        }
+        if isinstance(output, (tuple, list)) and len(output) == 2:
+            _, metadata = output
+            if isinstance(metadata, dict):
+                self.captured = {
+                    k: v.detach()
+                    for k, v in metadata.items()
+                    if isinstance(v, torch.Tensor)
+                }
 
 
 def compute_activation_stats(captures: dict) -> dict:

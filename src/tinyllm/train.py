@@ -88,6 +88,10 @@ def run(args):
             num_epochs = train_config.get("num_epochs", 1)
             num_training_steps = (max_batches or 1_000_000_000) * num_epochs
 
+    # warmup_steps as float (0-1) = fraction of training, int = absolute steps
+    if isinstance(num_warmup_steps, float) and 0 < num_warmup_steps < 1:
+        num_warmup_steps = int(num_warmup_steps * num_training_steps)
+
     lr_scheduler = lr_scheduler_factory(
         train_config.lr_scheduler_type,
         optimizer,

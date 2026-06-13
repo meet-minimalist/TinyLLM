@@ -87,7 +87,8 @@ class AnalysisCallback(BaseCallback):
         from src.tinyllm.analysis.activation_stats import ActivationCapture
 
         for name, module in model.named_modules():
-            if "attn" in name and hasattr(module, "forward"):
+            # Match modules named exactly "attn" (not attn_norm, attn_norm_2, etc.)
+            if name.endswith(".attn") or name == "attn":
                 capture = ActivationCapture(name)
                 self.activation_captures[name] = capture
                 self._hooks.append(module.register_forward_hook(capture))

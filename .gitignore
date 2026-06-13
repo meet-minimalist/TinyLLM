@@ -9,3 +9,4 @@ tinyllm_env*/
 gpt_training/
 data_cache/
 .env
+$PROFILE.txt

@@ -7,13 +7,19 @@ def compute_svd_and_variance(W: torch.Tensor, thresholds=(0.95, 0.99)):
     """
     Compute SVD and variance explained for a weight matrix.
 
+    The **condition number** (σ_max / σ_min) measures how ill-conditioned
+    the weight matrix is. Values >> 1 indicate near-singular directions
+    that can cause training instability. Values ≈ 1 indicate isotropic,
+    well-conditioned transformations. Infinity means the matrix is
+    rank-deficient (at least one zero singular value).
+
     Args:
         W: 2D weight tensor (M, N).
         thresholds: Tuple of variance thresholds to compute.
 
     Returns:
         Dict with singular values, eigenvalues, variance ratios,
-        and number of eigenvalues needed for each threshold.
+        number of eigenvalues needed for each threshold, and condition number.
     """
     W = W.float()
     t0 = time.perf_counter()
@@ -38,6 +44,10 @@ def compute_svd_and_variance(W: torch.Tensor, thresholds=(0.95, 0.99)):
         result[f"n_for_{int(t*100)}pct"] = n
         result[f"ratio_for_{int(t*100)}pct"] = min(1.0, n / max(1, S.shape[0]))
 
+    # Condition number = σ_max / σ_min.
+    #   ~1  → isotropic, well-conditioned (all singular values similar)
+    #   >>1 → ill-conditioned, near-singular (some directions strongly suppressed)
+    #   inf → rank-deficient (exact zero singular value)
     result["condition_number"] = (
         (S[0] / S[-1]).item() if S[-1] > 0 else float("inf")
     )
@@ -46,7 +56,29 @@ def compute_svd_and_variance(W: torch.Tensor, thresholds=(0.95, 0.99)):
 
 
 def compute_weightwatcher_alpha(W: torch.Tensor, xmin=None):
-    """Compute WeightWatcher power-law alpha exponent."""
+    """
+    Compute WeightWatcher power-law alpha exponent for a weight matrix.
+
+    The alpha parameter measures how heavy-tailed the eigenvalue distribution is.
+    It is estimated by fitting P(λ) ~ λ^(−α) to the tail of the empirical
+    spectrum using the Hill estimator with KS-based cutoff selection.
+
+    Interpretation:
+        α < 2   — Heavy-tailed; layer has learned structured features.
+                  Very low α (< 1.5) may indicate memorization/overfitting.
+        α 2–4   — Well-trained with good generalization (optimal range).
+        α 4–6   — Moderate structure, somewhat undertrained.
+        α 6–10  — Near random initialization; limited learning.
+        α → ∞   — White noise (all eigenvalues equal); untrained.
+
+    Args:
+        W: 2D weight tensor (M, N).
+        xmin: Optional lower bound for the power-law tail fit.
+              If None, the Hill estimator searches for the optimal cutoff.
+
+    Returns:
+        Alpha exponent (float). Higher = more random, lower = more structured.
+    """
     W = W.float()
     sv = torch.linalg.svdvals(W)
     evals = sv * sv

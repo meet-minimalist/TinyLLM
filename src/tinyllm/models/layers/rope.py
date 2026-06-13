@@ -79,8 +79,12 @@ def apply_rotary_pos_emb(
         x1, x2 = x.chunk(2, dim=-1)
         return torch.cat((-x2, x1), dim=-1)
 
-    cos = cos.unsqueeze(0).unsqueeze(0)  # [1, 1, seq_len, head_dim]
-    sin = sin.unsqueeze(0).unsqueeze(0)  # [1, 1, seq_len, head_dim]
+    cos = (
+        cos.unsqueeze(0).unsqueeze(0).to(dtype=q.dtype)
+    )  # [1, 1, seq_len, head_dim]
+    sin = (
+        sin.unsqueeze(0).unsqueeze(0).to(dtype=q.dtype)
+    )  # [1, 1, seq_len, head_dim]
 
     q_rotated = (q * cos) + (rotate_half(q) * sin)
     k_rotated = (k * cos) + (rotate_half(k) * sin)

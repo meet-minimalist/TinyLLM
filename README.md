@@ -238,7 +238,14 @@ kernels:
 - **Weight stats**: mean, std, min, max, L2, sparsity per parameter
 - **Gradient norms**: per-parameter via backward hooks (captured before zero_grad)
 - **Spectral analysis**: SVD, variance explained ratio, condition number
-- **WeightWatcher alpha**: heavy-tailedness metric (α < 2 = redundant, α > 10 = near-white-noise)
+  - Condition number = σ₀ / σₙ (largest ÷ smallest singular value)
+  - ≈ 1 → isotropic, well-conditioned; >> 1 → near-singular (training instability risk); ∞ → rank-deficient
+  - Logged per 2D weight layer under `spectral/{name}/condition_number`
+- **WeightWatcher alpha**: power-law tail exponent of the eigenvalue spectrum per 2D layer
+  - α < 2 → heavy-tailed (structured features, potentially overfit)
+  - α 2–4 → well-trained, good generalization (optimal)
+  - α > 6 → near random initialization (undertrained)
+  - Computed via Hill estimator + KS minimization on the eigenvalue distribution
 - **Timing**: per-analysis latency logged to WandB
 - **HellaSwag**: periodic evaluation benchmark
 

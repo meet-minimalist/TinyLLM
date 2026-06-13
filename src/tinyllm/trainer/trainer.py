@@ -44,6 +44,7 @@ class Trainer:
         self.iters_to_accumulate = getattr(
             train_config, "iters_to_accumulate", 1
         )
+        self.max_grad_norm = getattr(train_config, "max_grad_norm", None)
         self.log_every = getattr(train_config, "log_every", 10)
 
         self.global_step = 0
@@ -178,6 +179,12 @@ class Trainer:
         )
 
         if should_step:
+            if self.use_amp:
+                self.scaler.unscale_(self.optimizer)
+            if self.max_grad_norm is not None:
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(), self.max_grad_norm
+                )
             if self.use_amp:
                 self.scaler.step(self.optimizer)
                 self.scaler.update()

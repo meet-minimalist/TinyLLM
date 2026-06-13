@@ -8,14 +8,19 @@ import torch
 
 
 class CheckpointCallback(BaseCallback):
-    """Saves checkpoints at the end of each epoch, keeping only the last N."""
+    """Saves checkpoints at epoch end and/or every N steps, keeping only the last N."""
 
     def __init__(
-        self, ckpt_dir: str, model_name: str = "model", max_to_keep: int = 3
+        self,
+        ckpt_dir: str,
+        model_name: str = "model",
+        max_to_keep: int = 3,
+        save_every_steps: int = 0,
     ):
         self.ckpt_dir = ckpt_dir
         self.model_name = model_name
         self.max_to_keep = max_to_keep
+        self.save_every_steps = save_every_steps
         self.ckpt_path_history = []
 
     def _ckpt_path(self, epoch: int, global_step: int, test_loss: float) -> str:
@@ -27,22 +32,17 @@ class CheckpointCallback(BaseCallback):
             name = f"{self.model_name}.pt"
         return os.path.join(self.ckpt_dir, name)
 
-    def on_epoch_end(self, **kwargs):
-        epoch = kwargs.get("epoch")
-        global_step = kwargs.get("global_step")
-        test_loss = kwargs.get("test_loss")
-
+    def _save(self, epoch, global_step, test_loss, model, optimizer, scaler):
         ckpt_path = self._ckpt_path(
             epoch, global_step, test_loss or float("inf")
         )
-
         checkpoint = {
             "epoch": epoch,
             "global_step": global_step,
             "test_loss": test_loss,
-            "model": kwargs.get("model"),
-            "optimizer": kwargs.get("optimizer"),
-            "scaler": kwargs.get("scaler"),
+            "model": model,
+            "optimizer": optimizer,
+            "scaler": scaler,
         }
         torch.save(checkpoint, ckpt_path)
         self.ckpt_path_history.append(ckpt_path)
@@ -52,3 +52,28 @@ class CheckpointCallback(BaseCallback):
             old_path = self.ckpt_path_history.pop(0)
             if os.path.exists(old_path):
                 os.remove(old_path)
+
+    def on_train_step_end(self, **kwargs):
+        global_step = kwargs.get("global_step", 0)
+        if (
+            self.save_every_steps > 0
+            and global_step % self.save_every_steps == 0
+        ):
+            self._save(
+                epoch=kwargs.get("epoch"),
+                global_step=global_step,
+                test_loss=None,
+                model=kwargs.get("model"),
+                optimizer=kwargs.get("optimizer"),
+                scaler=kwargs.get("scaler"),
+            )
+
+    def on_epoch_end(self, **kwargs):
+        self._save(
+            epoch=kwargs.get("epoch"),
+            global_step=kwargs.get("global_step"),
+            test_loss=kwargs.get("test_loss"),
+            model=kwargs.get("model"),
+            optimizer=kwargs.get("optimizer"),
+            scaler=kwargs.get("scaler"),
+        )

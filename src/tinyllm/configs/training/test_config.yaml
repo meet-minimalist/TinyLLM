@@ -39,6 +39,6 @@ analysis:
   track_weights: true
   track_gradients: false
   track_activations: false
-  spectral: false
+  spectral: true
 
 benchmarks: {}

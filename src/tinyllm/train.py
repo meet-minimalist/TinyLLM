@@ -75,11 +75,18 @@ def run(args):
     optimizer = optimizer_factory(model, train_config)
 
     num_warmup_steps = train_config.get("warmup_steps", 0)
-    try:
-        steps_per_epoch = len(train_loader)
-        num_training_steps = train_config.get("num_epochs", 1) * steps_per_epoch
-    except Exception:
-        num_training_steps = train_config.get("num_training_steps", 100)
+    # num_training_steps for the LR scheduler (needs a concrete value)
+    num_training_steps = train_config.get("num_training_steps", 0)
+    if num_training_steps == 0:
+        try:
+            steps_per_epoch = len(train_loader)
+            num_training_steps = (
+                train_config.get("num_epochs", 1) * steps_per_epoch
+            )
+        except Exception:
+            max_batches = train_config.get("max_batches", 0)
+            num_epochs = train_config.get("num_epochs", 1)
+            num_training_steps = (max_batches or 1_000_000_000) * num_epochs
 
     lr_scheduler = lr_scheduler_factory(
         train_config.lr_scheduler_type,
@@ -89,7 +96,12 @@ def run(args):
     )
 
     callbacks = [
-        CheckpointCallback(exp_path, "model", max_to_keep=3),
+        CheckpointCallback(
+            exp_path,
+            "model",
+            max_to_keep=3,
+            save_every_steps=train_config.get("save_every_steps", 0),
+        ),
     ]
     if getattr(train_config, "use_wandb", False):
         callbacks.append(WandbCallback())

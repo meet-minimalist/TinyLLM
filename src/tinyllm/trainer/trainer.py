@@ -46,6 +46,9 @@ class Trainer:
         )
         self.log_every = getattr(train_config, "log_every", 10)
 
+        self.global_step = 0
+        self.global_tokens = 0
+
         self.model.to(self.device)
 
         use_compile = getattr(train_config, "use_compile", True)
@@ -86,8 +89,6 @@ class Trainer:
             tokenizer=self.tokenizer,
             device=self.device,
         )
-        self.global_step = 0
-
         for epoch in range(self.train_config.num_epochs):
             self._run_epoch(epoch)
 
@@ -125,16 +126,22 @@ class Trainer:
 
     def _epoch_train(self):
         self.model.train()
-        # IterableDataset has no __len__; use max_batches from config if available
+        max_steps = self.train_config.get("num_training_steps", 0) or 0
+        if max_steps == 0 and self.train_config.get("num_epochs", 1) > 0:
+            # run until dataloader exhausts or max_batches limit is hit
+            pass
         try:
             total = len(self.train_loader)
         except TypeError:
-            total = self.train_config.get("max_batches", 0) or 1_000_000_000
-            if total == 1_000_000_000:
-                total = self.train_config.get(
-                    "num_training_steps", 1_000_000_000
-                )
+            total = (
+                self.train_config.get("max_batches", 0)
+                or max_steps
+                or 1_000_000_000
+            )
         for batch_idx, batched_input in enumerate(self.train_loader):
+            if max_steps and self.global_step >= max_steps:
+                logger.info(f"Reached {max_steps} steps, stopping training")
+                return
             self._step_train(batched_input, batch_idx, total)
 
     def _step_train(self, batched_input, batch_idx, total_batches):
@@ -179,6 +186,9 @@ class Trainer:
             self.optimizer.zero_grad(set_to_none=True)
             self._step_lr()
 
+        self.global_step += 1
+        self.global_tokens += inputs.numel()
+
         if (batch_idx + 1) % self.log_every == 0 or (
             batch_idx + 1 == total_batches
         ):
@@ -190,8 +200,9 @@ class Trainer:
             ppl = torch.exp(loss * self.iters_to_accumulate).item()
             loss_value = loss.item() * self.iters_to_accumulate
             logger.info(
-                f"Step: {batch_idx + 1}/{total_batches}, "
-                f"Loss: {loss_value:.4f}, PPL: {ppl:.4f}, LR: {lr:.6f}"
+                f"Step: {self.global_step}/{total_batches}, "
+                f"Loss: {loss_value:.4f}, PPL: {ppl:.4f}, "
+                f"LR: {lr:.6f}, Tokens: {self.global_tokens}"
             )
 
             self.callback_handler.on_train_step_end(
@@ -200,13 +211,14 @@ class Trainer:
                     "train_loss": loss_value,
                     "train_ppl": ppl,
                     "lr": lr,
+                    "tokens": self.global_tokens,
                 },
                 model=self.model,
+                optimizer=self.optimizer,
+                scaler=self.scaler,
                 tokenizer=self.tokenizer,
                 device=self.device,
             )
-
-        self.global_step += 1
 
     def _step_lr(self):
         if hasattr(self.lr_scheduler, "step"):

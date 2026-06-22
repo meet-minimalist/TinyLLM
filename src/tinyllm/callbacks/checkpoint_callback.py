@@ -36,13 +36,21 @@ class CheckpointCallback(BaseCallback):
         ckpt_path = self._ckpt_path(
             epoch, global_step, test_loss or float("inf")
         )
+        model_sd = model.state_dict() if hasattr(model, "state_dict") else model
+        opt_sd = (
+            optimizer.state_dict()
+            if hasattr(optimizer, "state_dict")
+            else optimizer
+        )
         checkpoint = {
             "epoch": epoch,
             "global_step": global_step,
             "test_loss": test_loss,
-            "model": model,
-            "optimizer": optimizer,
-            "scaler": scaler,
+            "model": model_sd,
+            "optimizer": opt_sd,
+            "scaler": (
+                scaler.state_dict() if hasattr(scaler, "state_dict") else scaler
+            ),
         }
         torch.save(checkpoint, ckpt_path)
         self.ckpt_path_history.append(ckpt_path)

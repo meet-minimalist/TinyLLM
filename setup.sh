@@ -51,4 +51,8 @@ pip install -r requirements.txt
 echo "Safely installing liger-kernel without conflicting dependencies..."
 pip install "liger-kernel>=0.5.0" --no-deps
 
+# 6. Install flash-attn (optional, for varlen flash attention)
+echo "Installing flash-attn (optional)..."
+pip install flash-attn
+
 echo "🎉 Installation Completed Successfully!"

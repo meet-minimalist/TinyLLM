@@ -56,5 +56,13 @@ if %errorlevel% neq 0 (
     exit /b %errorlevel%
 )
 
+:: 6. Install flash-attn (optional, for varlen flash attention)
+echo Installing flash-attn (optional)...
+pip install flash-attn
+if %errorlevel% neq 0 (
+    echo ERROR: Installation of flash-attn failed.
+    exit /b %errorlevel%
+)
+
 echo 🎉 Windows Installation Completed Successfully!
 endlocal

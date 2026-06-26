@@ -9,9 +9,13 @@ from src.tinyllm.logger.logger_utils import logger
 class GradientCapture:
     """Captures per-parameter gradient statistics during backward via hooks."""
 
-    def __init__(self, model, num_bins: int = 32):
+    def __init__(self, model, num_bins: int = 32, ema_beta: float = 0.99):
         self.num_bins = num_bins
-        self.stats = {}  # name -> {norm, mean, std, abs_max, _hist}
+        self.ema_beta = ema_beta
+        self.stats = {}  # name -> {norm, _hist, snr}
+        self._ema = (
+            {}
+        )  # name -> {mean, var} — persists across steps for SNR EMA
         self._handles = []
 
         for name, p in model.named_parameters():
@@ -23,9 +27,24 @@ class GradientCapture:
             import numpy as np
 
             g = grad.detach().float().flatten()
+            beta = self.ema_beta
+
+            # EMA of gradient mean and variance for SNR approximation
+            if name not in self._ema:
+                self._ema[name] = {
+                    "mean": torch.zeros_like(g),
+                    "var": torch.ones_like(g),
+                }
+            ema = self._ema[name]
+            new_mean = beta * ema["mean"] + (1 - beta) * g
+            new_var = beta * ema["var"] + (1 - beta) * (g - new_mean).pow(2)
+            self._ema[name] = {"mean": new_mean, "var": new_var}
+            snr = (new_mean.abs() / (new_var.sqrt() + 1e-8)).mean().item()
+
             self.stats[name] = {
                 "norm": g.norm().item(),
                 "_hist": np.histogram(g.cpu().numpy(), bins=self.num_bins),
+                "snr": snr,
             }
 
         return hook
@@ -127,6 +146,15 @@ class AnalysisCallback(BaseCallback):
         log_dict = {}
         timing_log = {}
 
+        # 0. GPU memory (cheap, always log when CUDA available)
+        if torch.cuda.is_available():
+            log_dict["system/gpu_memory_allocated_gb"] = (
+                torch.cuda.memory_allocated() / 1e9
+            )
+            log_dict["system/gpu_memory_reserved_gb"] = (
+                torch.cuda.memory_reserved() / 1e9
+            )
+
         # 1. Gradient global stats + histograms
         if self._grad_capture is not None:
             t0 = time.perf_counter()
@@ -135,6 +163,15 @@ class AnalysisCallback(BaseCallback):
             for k, v in gstats.items():
                 if k != "_layer_stats":
                     log_dict[f"gradients/{k}"] = v
+            layer_snrs = [
+                s["snr"]
+                for s in gstats.get("_layer_stats", {}).values()
+                if "snr" in s
+            ]
+            if layer_snrs:
+                log_dict["gradients/global/snr"] = sum(layer_snrs) / len(
+                    layer_snrs
+                )
             self._grad_capture.clear()
 
         # 2. Weight histograms
@@ -168,6 +205,14 @@ class AnalysisCallback(BaseCallback):
                 compute_weightwatcher_alpha,
             )
 
+            _spectral_skip = {
+                "singular_values",
+                "eigenvalues",
+                "cumulative_variance_ratio",
+                "total_variance",
+                "num_singular_values",
+                "time_svd",
+            }
             t0 = time.perf_counter()
             for name, p in model.named_parameters():
                 if p.ndim >= 2:
@@ -177,13 +222,8 @@ class AnalysisCallback(BaseCallback):
                         )
                         prefix = f"spectral/{name}"
                         for k, v in result.items():
-                            if k in (
-                                "singular_values",
-                                "eigenvalues",
-                                "cumulative_variance_ratio",
-                            ):
-                                continue
-                            log_dict[f"{prefix}/{k}"] = v
+                            if k not in _spectral_skip:
+                                log_dict[f"{prefix}/{k}"] = v
 
                         alpha = compute_weightwatcher_alpha(p)
                         log_dict[f"{prefix}/alpha"] = alpha
@@ -231,10 +271,13 @@ class AnalysisCallback(BaseCallback):
                         )
                 if self.track_weights:
                     for name, s in wstats.items():
-                        if isinstance(s, dict) and "_hist" in s:
-                            log_dict[f"weights/hist/{name}"] = wandb.Histogram(
-                                np_histogram=s["_hist"]
-                            )
+                        if isinstance(s, dict):
+                            if "_hist" in s:
+                                log_dict[f"weights/hist/{name}"] = (
+                                    wandb.Histogram(np_histogram=s["_hist"])
+                                )
+                            if "snr" in s:
+                                log_dict[f"weights/snr/{name}"] = s["snr"]
                 for key, hist in activation_hists.items():
                     log_dict[f"activations/hist/{key}"] = wandb.Histogram(
                         np_histogram=hist

@@ -52,6 +52,21 @@ def compute_svd_and_variance(W: torch.Tensor, thresholds=(0.95, 0.99)):
         (S[0] / S[-1]).item() if S[-1] > 0 else float("inf")
     )
 
+    # Stable rank = ‖W‖_F² / ‖W‖_2² = sum(S²) / S_max²
+    # Drops drastically when the matrix loses structural diversity.
+    result["stable_rank"] = (total / evals[0]).item()
+
+    # Effective rank via spectral entropy: e^H(W) where p_i = S_i / sum(S_j)
+    # More sensitive to rank collapse than stable rank.
+    p = S / S.sum()
+    H = -(p * (p + 1e-10).log()).sum()
+    result["effective_rank"] = H.exp().item()
+
+    # Top-10 energy ratio: fraction of total variance in the top-10 singular values.
+    # Rising → low-frequency structure emerging. Near 1.0 early → rank collapse warning.
+    k = min(10, S.shape[0])
+    result["top10_energy_ratio"] = (evals[:k].sum() / total).item()
+
     return result
 
 

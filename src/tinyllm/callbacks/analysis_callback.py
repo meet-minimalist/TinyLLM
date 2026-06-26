@@ -7,51 +7,54 @@ from src.tinyllm.logger.logger_utils import logger
 
 
 class GradientCapture:
-    """Captures per-parameter gradient norms during backward via hooks."""
+    """Captures per-parameter gradient statistics during backward via hooks."""
 
-    def __init__(self, model):
-        self.norms = {}
+    def __init__(self, model, num_bins: int = 32):
+        self.num_bins = num_bins
+        self.stats = {}  # name -> {norm, mean, std, abs_max, _hist}
         self._handles = []
 
         for name, p in model.named_parameters():
             if p.requires_grad:
-                handle = p.register_hook(self._make_hook(name))
-                self._handles.append(handle)
+                self._handles.append(p.register_hook(self._make_hook(name)))
 
     def _make_hook(self, name):
         def hook(grad):
-            self.norms[name] = grad.norm().item()
+            import numpy as np
+
+            g = grad.detach().float().flatten()
+            self.stats[name] = {
+                "norm": g.norm().item(),
+                "_hist": np.histogram(g.cpu().numpy(), bins=self.num_bins),
+            }
 
         return hook
 
     def compute_stats(self):
-        if not self.norms:
+        if not self.stats:
             return {}
 
-        total = 0.0
+        total_sq = 0.0
         n_zero = 0
         n_exploded = 0
-        layer_norms = {}
 
-        for name, norm_val in self.norms.items():
-            layer_norms[name] = norm_val
-            total += norm_val**2
-            if norm_val == 0:
+        for s in self.stats.values():
+            total_sq += s["norm"] ** 2
+            if s["norm"] == 0:
                 n_zero += 1
-            if norm_val > 1e4:
+            if s["norm"] > 1e4:
                 n_exploded += 1
 
-        total = total**0.5
         return {
-            "global/gradient_norm": total,
+            "global/gradient_norm": total_sq**0.5,
             "global/exploded_gradients": n_exploded,
             "global/zero_gradients": n_zero,
-            "global/layers_with_grad": len(self.norms),
-            "_layer_norms": layer_norms,
+            "global/layers_with_grad": len(self.stats),
+            "_layer_stats": self.stats,
         }
 
     def clear(self):
-        self.norms = {}
+        self.stats = {}
 
     def remove(self):
         for h in self._handles:
@@ -71,6 +74,7 @@ class AnalysisCallback(BaseCallback):
             "variance_thresholds", [0.95, 0.99]
         )
         self.track_layer_cosim = config.get("track_layer_cosim", False)
+        self.hist_bins = config.get("hist_bins", 32)
         self._hooks = []
         self._grad_capture = None
         self._attn_capture = None  # ForwardHookCapture for attention metadata
@@ -82,7 +86,7 @@ class AnalysisCallback(BaseCallback):
         if model is None:
             return
         if self.track_gradients:
-            self._grad_capture = GradientCapture(model)
+            self._grad_capture = GradientCapture(model, num_bins=self.hist_bins)
         if self.track_activations:
             self._register_activation_hooks(model)
         if self.track_layer_cosim:
@@ -121,52 +125,39 @@ class AnalysisCallback(BaseCallback):
         log_dict = {}
         timing_log = {}
 
-        # 1. Gradient norms (captured during backward via hooks)
+        # 1. Gradient global stats + histograms
         if self._grad_capture is not None:
             t0 = time.perf_counter()
             gstats = self._grad_capture.compute_stats()
-            timing_log["time/gradient_norms"] = time.perf_counter() - t0
+            timing_log["time/gradient_stats"] = time.perf_counter() - t0
             for k, v in gstats.items():
-                if k in ("_layer_norms",):
-                    continue
-                log_dict[f"gradients/{k}"] = v
-            for name, norm_val in gstats.get("_layer_norms", {}).items():
-                log_dict[f"gradients/layer/{name}"] = norm_val
+                if k != "_layer_stats":
+                    log_dict[f"gradients/{k}"] = v
             self._grad_capture.clear()
 
-        # 2. Weight stats
+        # 2. Weight histograms
         if self.track_weights:
             from src.tinyllm.analysis.weight_stats import compute_weight_stats
 
             t0 = time.perf_counter()
-            wstats = compute_weight_stats(model)
+            wstats = compute_weight_stats(model, num_bins=self.hist_bins)
             timing_log["time/weight_stats"] = time.perf_counter() - t0
-            for name, stats in wstats.items():
-                if name == "_time":
-                    continue
-                for k, v in stats.items():
-                    if isinstance(v, (int, float)):
-                        log_dict[f"weights/{name}/{k}"] = v
 
-        # 3. Activation stats
+        # 3. Activation histograms
+        activation_hists = {}
         if self.track_activations and self._attn_capture is not None:
-            from src.tinyllm.analysis.activation_stats import (
-                compute_activation_stats,
-            )
+            import numpy as np
 
             t0 = time.perf_counter()
-            captures = {
-                name: tensors
-                for name, tensors in self._attn_capture.captured.items()
-                if tensors
-            }
-            if captures:
-                astats = compute_activation_stats(captures)
-                timing_log["time/activation_stats"] = time.perf_counter() - t0
-                for k, v in astats.items():
-                    if k == "_time":
-                        continue
-                    log_dict[f"activations/{k}"] = v
+            for layer_name, tensors in self._attn_capture.captured.items():
+                for tensor_name, tensor in tensors.items():
+                    key = f"{layer_name}/{tensor_name}"
+                    activation_hists[key] = np.histogram(
+                        tensor.cpu().float().flatten().numpy(),
+                        bins=self.hist_bins,
+                    )
+            self._attn_capture.clear()
+            timing_log["time/activation_stats"] = time.perf_counter() - t0
 
         # 4. Spectral analysis
         if self.track_spectral:
@@ -206,6 +197,11 @@ class AnalysisCallback(BaseCallback):
                 compute_layer_cosine_similarities,
             )
 
+            if not self._layer_capture.captured:
+                logger.warning(
+                    "layer_cosim: no TransformerBlock outputs captured — "
+                    "hooks may not be firing (torch.compile can suppress hooks)."
+                )
             sims = compute_layer_cosine_similarities(
                 self._layer_capture.captured
             )
@@ -226,6 +222,21 @@ class AnalysisCallback(BaseCallback):
             try:
                 import wandb
 
+                if self._grad_capture is not None:
+                    for name, s in gstats.get("_layer_stats", {}).items():
+                        log_dict[f"gradients/hist/{name}"] = wandb.Histogram(
+                            np_histogram=s["_hist"]
+                        )
+                if self.track_weights:
+                    for name, s in wstats.items():
+                        if isinstance(s, dict) and "_hist" in s:
+                            log_dict[f"weights/hist/{name}"] = wandb.Histogram(
+                                np_histogram=s["_hist"]
+                            )
+                for key, hist in activation_hists.items():
+                    log_dict[f"activations/hist/{key}"] = wandb.Histogram(
+                        np_histogram=hist
+                    )
                 if self.track_layer_cosim and self._layer_cosim_history:
                     all_sims = [s for _, s in self._layer_cosim_history]
                     all_steps = [st for st, _ in self._layer_cosim_history]
@@ -235,6 +246,7 @@ class AnalysisCallback(BaseCallback):
                         keys=[f"step {st}" for st in all_steps],
                         title="Layer-wise Cosine Similarity",
                         xname="Layer pair (i → i+1)",
+                        yname="Cosine Similarity",
                     )
                 wandb.log(log_dict, step=global_step)
             except ImportError:

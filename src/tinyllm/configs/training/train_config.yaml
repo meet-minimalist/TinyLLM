@@ -41,12 +41,14 @@ use_wandb: true
 resume_wandb_id: null
 
 analysis:
-  every_n_steps: 500
+  every_n_steps: 50
   track_weights: true
   track_gradients: true
   track_activations: true
+  track_layer_cosim: true
   spectral: true
   variance_thresholds: [0.95, 0.99]
+  hist_bins: 512
 
 kernels:
   use_liger: false     # requires Triton (Linux/WSL only on CUDA 12.4+; not available on Windows)

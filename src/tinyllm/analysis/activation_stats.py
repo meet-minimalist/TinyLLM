@@ -1,5 +1,3 @@
-import time
-
 import torch
 
 
@@ -45,34 +43,6 @@ class ForwardHookCapture:
 
     def clear(self):
         self.captured.clear()
-
-
-def compute_activation_stats(captures: dict) -> dict:
-    """
-    Compute statistics from captured activation tensors.
-
-    Args:
-        captures: Dict mapping layer_name -> {tensor_name -> tensor}
-
-    Returns:
-        Flattened dict suitable for WandB logging.
-    """
-    t0 = time.perf_counter()
-    stats = {}
-
-    for layer_name, tensors in captures.items():
-        for tensor_name, tensor in tensors.items():
-            with torch.no_grad():
-                key = f"{layer_name}/{tensor_name}"
-                stats[f"{key}/mean"] = tensor.mean().item()
-                stats[f"{key}/std"] = tensor.std().item()
-                stats[f"{key}/min"] = tensor.min().item()
-                stats[f"{key}/max"] = tensor.max().item()
-                stats[f"{key}/norm"] = tensor.norm().item()
-                stats[f"{key}/shape"] = list(tensor.shape)
-
-    stats["_time"] = time.perf_counter() - t0
-    return stats
 
 
 def compute_layer_cosine_similarities(layer_outputs: dict) -> list:

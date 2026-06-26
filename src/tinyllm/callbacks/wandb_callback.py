@@ -31,8 +31,6 @@ class WandbCallback(BaseCallback):
             id=resume_id,
         )
 
-        self.wandb.watch(model, log="all", log_freq=100)
-
     def on_train_end(self, **kwargs):
         self.wandb.finish()
 

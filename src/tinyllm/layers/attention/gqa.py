@@ -101,24 +101,20 @@ class GQA(nn.Module):
         if cos is not None and sin is not None:
             q, k = apply_rotary_pos_emb(q, k, cos, sin)
         if self.q_norm is not None:
-            q_norm_out = self.q_norm(q)
-            k_norm_out = self.k_norm(k)
-            q, k = q_norm_out, k_norm_out
-
-        # Expand kv heads for equivalent full-head computation
-        if self.num_groups > 1:
-            k = k.repeat_interleave(self.num_groups, dim=1)
-            v = v.repeat_interleave(self.num_groups, dim=1)
+            q = self.q_norm(q)
+            k = self.k_norm(k)
 
         B, H, S, D = q.shape
 
         if self.flash and cu_seqlens is not None and _check_flash_attn_pkg():
-            # ---- flash_attn varlen API (requires flash-attn package) ----
+            # ---- flash_attn varlen API — natively supports GQA ----
+            # Pass compact K/V with num_kv_heads (NOT expanded). flash_attn
+            # handles the grouping internally, which is the whole point of GQA.
             from flash_attn import flash_attn_varlen_func
 
             q_flat = q.transpose(1, 2).reshape(-1, H, D)
-            k_flat = k.transpose(1, 2).reshape(-1, H, D)
-            v_flat = v.transpose(1, 2).reshape(-1, H, D)
+            k_flat = k.transpose(1, 2).reshape(-1, self.num_kv_heads, D)
+            v_flat = v.transpose(1, 2).reshape(-1, self.num_kv_heads, D)
 
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
 
@@ -137,7 +133,12 @@ class GQA(nn.Module):
             attn_out = attn_out.reshape(B, S, H, D).transpose(1, 2)
             attn_weights = None
         else:
-            # ---- F.scaled_dot_product_attention with optional block mask ----
+            # ---- F.scaled_dot_product_attention fallback ----
+            # SDPA doesn't natively handle GQA grouping, so expand K/V here.
+            if self.num_groups > 1:
+                k = k.repeat_interleave(self.num_groups, dim=1)
+                v = v.repeat_interleave(self.num_groups, dim=1)
+
             if cu_seqlens is not None:
                 attn_mask = make_block_causal_mask(cu_seqlens)
             else:

@@ -1,0 +1,23 @@
+model_type: "dynamic"
+tokenizer_name: "gpt2"
+
+# ~50M parameters: 8 blocks × ~3.1M + 25.8M embedding (tied) ≈ 50.6M total
+# Architecture: SwiGLU FFN + RMSNorm (modern Llama-style)
+d_model: 512
+vocab_size: 50304  # nearest multiple of 64 above GPT-2 vocab (50257)
+max_seq_len: 1024
+embedding: "rope_only"
+
+blocks:
+  count: 8
+  attention: "gqa"
+  num_heads: 8
+  num_kv_heads: 2    # 4:1 query-to-KV ratio; cuts KV projection params by 4×
+  ffn: "gated"       # SwiGLU: gate(x) * up(x) → down  (GatedFFN in registry)
+  norm: "rms"        # RMSNorm: faster than LayerNorm, no mean subtraction
+  ff_multiplier: 4
+  act_fn: "swish"    # SiLU activation (standard SwiGLU gate)
+
+head:
+  norm: "rms"
+  tie_weights: true

@@ -32,8 +32,8 @@ label_smoothing: 0.1
 use_grad_accum: true
 iters_to_accumulate: 4
 
-fp16_training: true
-use_compile: false
+precision: "bf16"       # "bf16" (default) | "fp16" | "fp32"
+use_compile: true
 
 log_every: 10
 max_grad_norm: 1.0

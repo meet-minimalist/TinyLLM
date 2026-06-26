@@ -65,7 +65,7 @@ class GradientCapture:
                 n_exploded += 1
 
         return {
-            "global/gradient_norm": total_sq**0.5,
+            "global/norm": total_sq**0.5,
             "global/exploded_gradients": n_exploded,
             "global/zero_gradients": n_zero,
             "global/layers_with_grad": len(self.stats),
@@ -218,7 +218,7 @@ class AnalysisCallback(BaseCallback):
                         result = compute_svd_and_variance(
                             p, thresholds=self.variance_thresholds
                         )
-                        prefix = f"spectral/{name}"
+                        prefix = f"weights/{name}/spectral"
                         for k, v in result.items():
                             if k not in _spectral_skip:
                                 log_dict[f"{prefix}/{k}"] = v
@@ -264,22 +264,54 @@ class AnalysisCallback(BaseCallback):
 
                 if self._grad_capture is not None:
                     for name, s in gstats.get("_layer_stats", {}).items():
-                        log_dict[f"gradients/hist/{name}"] = wandb.Histogram(
+                        log_dict[f"gradients/{name}/hist"] = wandb.Histogram(
                             np_histogram=s["_hist"]
                         )
+                        log_dict[f"gradients/{name}/norm"] = s["norm"]
+                        log_dict[f"gradients/{name}/snr"] = s["snr"]
                 if self.track_weights:
                     for name, s in wstats.items():
                         if isinstance(s, dict):
                             if "_hist" in s:
-                                log_dict[f"weights/hist/{name}"] = (
+                                log_dict[f"weights/{name}/hist"] = (
                                     wandb.Histogram(np_histogram=s["_hist"])
                                 )
                             if "snr" in s:
-                                log_dict[f"weights/snr/{name}"] = s["snr"]
+                                log_dict[f"weights/{name}/snr"] = s["snr"]
                 for key, hist in activation_hists.items():
-                    log_dict[f"activations/hist/{key}"] = wandb.Histogram(
+                    log_dict[f"activations/{key}/hist"] = wandb.Histogram(
                         np_histogram=hist
                     )
+                if self.track_activations and self._attn_capture is not None:
+                    from src.tinyllm.analysis.spectral import (
+                        compute_svd_and_variance,
+                    )
+
+                    for (
+                        layer_name,
+                        tensors,
+                    ) in self._attn_capture.captured.items():
+                        for tensor_name, tensor in tensors.items():
+                            if tensor is None or tensor.ndim < 2:
+                                continue
+                            try:
+                                t2d = (
+                                    tensor.detach()
+                                    .float()
+                                    .view(-1, tensor.shape[-1])
+                                )
+                                result = compute_svd_and_variance(
+                                    t2d, thresholds=[]
+                                )
+                                key = f"activations/{layer_name}/{tensor_name}"
+                                log_dict[f"{key}/spectral/stable_rank"] = (
+                                    result["stable_rank"]
+                                )
+                                log_dict[f"{key}/spectral/effective_rank"] = (
+                                    result["effective_rank"]
+                                )
+                            except Exception:
+                                pass
                 if self.track_layer_cosim and self._layer_cosim_history:
                     _n = len(self._layer_cosim_history[0][1])
                     _cols = ["step"] + [

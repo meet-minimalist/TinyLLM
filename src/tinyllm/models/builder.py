@@ -93,7 +93,9 @@ class DynamicModel(BaseLLM):
 
         self.apply(self._init_weights)
 
-    def forward(self, input_ids, mask=None, cu_seqlens=None):
+    def forward(
+        self, input_ids, mask=None, cu_seqlens=None, return_hidden=False
+    ):
         x = self.token_embedding(input_ids)
         x = self.position_embedding(x)
 
@@ -105,4 +107,7 @@ class DynamicModel(BaseLLM):
         for block in self.transformer_blocks:
             x = block(x, mask=mask, cos=cos, sin=sin, cu_seqlens=cu_seqlens)
 
-        return self.lm_head(self.final_norm(x))
+        hidden = self.final_norm(x)
+        if return_hidden:
+            return hidden  # [B, S, d_model] — caller handles lm_head + loss
+        return self.lm_head(hidden)

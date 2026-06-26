@@ -32,13 +32,39 @@ class Trainer:
         self.device = torch.device(device)
         self.callback_handler = CallbackHandler(callbacks)
 
-        self.use_amp = getattr(train_config, "fp16_training", False)
-        if self.use_amp:
+        # precision: "bf16" (default) | "fp16" | "fp32"
+        self.precision = getattr(train_config, "precision", "bf16")
+        # GradScaler only needed for fp16 — bf16 has fp32 range, never overflows.
+        if self.precision == "fp16":
             from torch.amp import GradScaler
 
             self.scaler = GradScaler()
         else:
             self.scaler = None
+
+        # Fused linear+CE loss via Liger (avoids materializing [S, vocab] logits).
+        # Only active when use_liger=true in kernels config.
+        self._fused_ce = None
+        kernels_cfg = (
+            train_config.get("kernels", {})
+            if hasattr(train_config, "get")
+            else getattr(train_config, "kernels", {})
+        )
+        if kernels_cfg and kernels_cfg.get("use_liger", False):
+            from src.tinyllm.utils.kernels import try_liger_fused_ce
+
+            fused_cls = try_liger_fused_ce()
+            if fused_cls is not None:
+                label_smoothing = (
+                    train_config.get("label_smoothing", 0.0)
+                    if hasattr(train_config, "get")
+                    else getattr(train_config, "label_smoothing", 0.0)
+                )
+                self._fused_ce = fused_cls(
+                    ignore_index=tokenizer.pad_token_id,
+                    label_smoothing=label_smoothing,
+                )
+                logger.info("Using Liger FusedLinearCrossEntropyLoss")
 
         self.grad_accum = getattr(train_config, "use_grad_accum", False)
         self.iters_to_accumulate = getattr(
@@ -157,18 +183,30 @@ class Trainer:
             batch_idx=batch_idx,
         )
 
-        autocast_ctx = get_autocast_ctx(self.device, self.use_amp)
+        autocast_ctx = get_autocast_ctx(self.device, self.precision)
         with autocast_ctx:
-            logits = self.model(inputs, cu_seqlens=cu_seqlens)
-            loss = compute_ce_loss(
-                logits,
-                targets,
-                self.train_config.get("label_smoothing", 0.0),
-                self.tokenizer.pad_token_id,
-            )
+            if self._fused_ce is not None:
+                # Fused path: hidden states → lm_head + softmax + CE in one kernel.
+                # Avoids materializing [S, vocab_size] logits (~100 MB for vocab=50304).
+                hidden = self.model(
+                    inputs, cu_seqlens=cu_seqlens, return_hidden=True
+                )
+                B, S, D = hidden.shape
+                lm_weight = self.model.lm_head.weight
+                loss = self._fused_ce(
+                    hidden.view(B * S, D), lm_weight, targets.view(B * S)
+                )
+            else:
+                logits = self.model(inputs, cu_seqlens=cu_seqlens)
+                loss = compute_ce_loss(
+                    logits,
+                    targets,
+                    self.train_config.get("label_smoothing", 0.0),
+                    self.tokenizer.pad_token_id,
+                )
             loss = loss / self.iters_to_accumulate
 
-        if self.use_amp:
+        if self.scaler is not None:
             self.scaler.scale(loss).backward()
         else:
             loss.backward()
@@ -179,13 +217,13 @@ class Trainer:
         )
 
         if should_step:
-            if self.use_amp:
+            if self.scaler is not None:
                 self.scaler.unscale_(self.optimizer)
             if self.max_grad_norm is not None:
                 torch.nn.utils.clip_grad_norm_(
                     self.model.parameters(), self.max_grad_norm
                 )
-            if self.use_amp:
+            if self.scaler is not None:
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
             else:
@@ -235,7 +273,8 @@ class Trainer:
         self.model.eval()
         total_loss = 0.0
         n_steps = 0
-        with torch.no_grad():
+        autocast_ctx = get_autocast_ctx(self.device, self.precision)
+        with torch.no_grad(), autocast_ctx:
             for batched_input in self.test_loader:
                 # Unpack: varlen -> (inputs, targets, cu_seqlens), fixed -> (inputs, targets)
                 if len(batched_input) == 3:

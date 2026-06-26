@@ -26,7 +26,7 @@ collected and aggregated at analysis steps.
 
 | Metric | Formula | Healthy | Warning |
 |---|---|---|---|
-| `gradients/global/gradient_norm` | `sqrt(sum(‖g_i‖²))` | Stable after warmup, minor oscillations | Exponential hockey-stick → explosion. Sudden drop to 0 → vanishing |
+| `gradients/global/norm` | `sqrt(sum(‖g_i‖²))` over all params | Stable after warmup, minor oscillations | Exponential hockey-stick → explosion. Sudden drop to 0 → vanishing |
 | `gradients/global/exploded_gradients` | Count of params with norm > 1e4 | 0 | Any non-zero value is a red flag |
 | `gradients/global/zero_gradients` | Count of params with norm = 0 | 0 | Dead parameters, possible dying ReLU or bad init |
 | `gradients/global/snr` | `mean(‖EMA_mean(g)‖ / sqrt(EMA_var(g)))` | High during warmup (>1), then moderately positive | Near 0 → batch too noisy, LR too high, or model has run out of signal to learn |
@@ -40,7 +40,11 @@ mean and variance across training steps. It measures directional certainty:
 - **SNR near 0:** Gradient noise dominates signal. Usually means: LR is too high,
   batch size too small, or training has converged and there is nothing more to learn.
 
-### Histograms (`gradients/hist/{param_name}`)
+### Per-parameter scalars (`gradients/{param_name}/norm`, `gradients/{param_name}/snr`)
+
+One entry per trainable parameter. `norm` is the L2 norm of that parameter's gradient alone (cf. `global/norm` which sums all). `snr` is the per-parameter EMA SNR. Use these to identify which specific layers have dead, exploding, or noisy gradients while the global scalar looks fine.
+
+### Histograms (`gradients/{param_name}/hist`)
 
 Distribution of gradient values for each parameter. Look for:
 - **Concentrated near zero, light tails:** Healthy, well-regularized gradients.
@@ -53,7 +57,7 @@ Distribution of gradient values for each parameter. Look for:
 
 Computed every analysis step directly from parameter values.
 
-### SNR (`weights/snr/{param_name}`)
+### SNR (`weights/{param_name}/snr`)
 
 `SNR = mean(|W|) / std(|W|)`
 
@@ -67,7 +71,7 @@ static — it reflects the current state of the weights, not their update direct
 | Late training | Plateaus | Normal — model has found its representational geometry |
 | Spiking while val loss stalls | Very high spike | **Overfitting / memorization.** A few weight paths are growing disproportionately large. |
 
-### Histograms (`weights/hist/{param_name}`)
+### Histograms (`weights/{param_name}/hist`)
 
 Distribution of raw weight values. Look for:
 - **Symmetric bell curve centered at 0:** Normal, well-initialized layer.
@@ -78,15 +82,17 @@ Distribution of raw weight values. Look for:
 
 ---
 
-## 4. Spectral Analysis (`spectral/`)
+## 4. Spectral Analysis (`weights/{name}/spectral/`)
 
 Computed via SVD on every 2D parameter. All metrics are **rotation-invariant** (they depend
 only on singular values, not the arbitrary coordinate system of the weight matrix).
+All spectral metrics live under `weights/{param_name}/spectral/` alongside the weight
+histogram and SNR for that parameter.
 
 Enable with `spectral: true` in the analysis config. Note: SVD is expensive; use
 `every_n_steps` of at least 500 for large models.
 
-### Condition Number (`spectral/{name}/condition_number`)
+### Condition Number (`weights/{name}/spectral/condition_number`)
 
 `κ = σ_max / σ_min`
 
@@ -99,7 +105,7 @@ Measures how ill-conditioned the weight matrix is.
 | 1,000–10,000 | **High specialization / near-singular.** Some directions are nearly suppressed. Common in late-layer attention projections. |
 | > 1e6 or inf | **Rank-deficient.** The matrix has effectively zero singular values — a sign of rank collapse or vanishing gradients killing entire subspaces. |
 
-### Stable Rank (`spectral/{name}/stable_rank`)
+### Stable Rank (`weights/{name}/spectral/stable_rank`)
 
 `stable_rank = ‖W‖_F² / ‖W‖_2² = sum(σ²) / σ_max²`
 
@@ -112,7 +118,7 @@ A soft, continuous version of matrix rank. Unlike algebraic rank, it doesn't col
 | Gradually decreasing | **Healthy compression.** The layer is discarding redundant directions and focusing on the most predictive ones. |
 | Sudden sharp drop | **Rank collapse warning.** The layer is losing structural diversity. Watch for this alongside rising condition number. |
 
-### Effective Rank (`spectral/{name}/effective_rank`)
+### Effective Rank (`weights/{name}/spectral/effective_rank`)
 
 `effective_rank = e^H(W)` where `H(W) = -sum(p_i * log(p_i))` and `p_i = σ_i / sum(σ_j)`
 
@@ -126,7 +132,7 @@ penalizes any deviation from uniform distribution.
 | Gradually decreasing | Normal learning — the layer is concentrating energy into fewer dominant directions. |
 | Rapidly collapsing to 1–5 | **Representation collapse.** The layer is squeezing all information into 1–5 principal directions, discarding nearly all capacity. |
 
-### Top-10 Energy Ratio (`spectral/{name}/top10_energy_ratio`)
+### Top-10 Energy Ratio (`weights/{name}/spectral/top10_energy_ratio`)
 
 `top10_energy_ratio = sum(σ²[:10]) / sum(σ²)`
 
@@ -141,7 +147,7 @@ structure corresponds to energy concentrated in a few dominant components.
 | > 0.9 early in training | **Rank collapse warning.** Almost all energy is in 10 directions before the model has had a chance to learn complex representations. |
 | > 0.9 late in training for small layers | May be acceptable — small embedding or head projection layers are expected to be low-rank. |
 
-### Components for 95%/99% Variance (`spectral/{name}/n_for_95pct`, `n_for_99pct`)
+### Components for 95%/99% Variance (`weights/{name}/spectral/n_for_95pct`, `n_for_99pct`)
 
 The number of singular values needed to capture 95% or 99% of the matrix's total variance.
 This directly answers "what is the effective dimensionality of this layer?"
@@ -151,7 +157,7 @@ This directly answers "what is the effective dimensionality of this layer?"
 - A large gap between `n_for_95pct` and `n_for_99pct` indicates a long tail of small
   singular values that contribute little individually but add up.
 
-### WeightWatcher Alpha (`spectral/{name}/alpha`)
+### WeightWatcher Alpha (`weights/{name}/spectral/alpha`)
 
 Power-law exponent fitted to the tail of the eigenvalue distribution `P(λ) ~ λ^(-α)`.
 
@@ -199,10 +205,13 @@ contribution evolves over training.
 
 ---
 
-## 6. Activation Histograms (`activations/hist/`)
+## 6. Activation Histograms + Spectral (`activations/`)
 
 Captured from attention layers via forward hooks. Only active when `track_activations: true`.
 Tensors captured per attention layer: `q`, `k`, `v`, `qkv_out`, `o_proj_out`.
+Metrics live under `activations/{layer_name}/{tensor_name}/`.
+
+### Histograms (`activations/{layer}/{tensor}/hist`)
 
 | Pattern | Interpretation |
 |---|---|
@@ -210,6 +219,22 @@ Tensors captured per attention layer: `q`, `k`, `v`, `qkv_out`, `o_proj_out`.
 | Collapsing toward zero | Layer is under-activating. Possible vanishing gradient or dead attention heads. |
 | Extremely heavy tails / saturation | Activations are saturating — consider reducing LR or adding gradient clipping. |
 | Bimodal for `q`/`k` | Heads have specialized into distinct query/key regimes — often healthy in mid-late training. |
+
+### Spectral (`activations/{layer}/{tensor}/spectral/stable_rank`, `effective_rank`)
+
+Measures whether the *outputs* of each layer are low-rank at inference time. Computed by
+reshaping the activation tensor `[B, S, D]` → `[B×S, D]` and running SVD. Only `stable_rank`
+and `effective_rank` are computed (full SVD reused for both, minimal overhead).
+
+| Trend | Interpretation |
+|---|---|
+| `effective_rank` near D (e.g. 512) | All representation dimensions in use — healthy diversity |
+| `effective_rank` dropping across layers | Progressive rank collapse in the residual stream — representations becoming degenerate |
+| `stable_rank` of `q` or `k` near 1 | Query/key space has collapsed to 1 direction — all heads attending to the same pattern |
+| Sudden drop at a specific layer | That layer is killing representational diversity — check its weight spectral metrics |
+
+Weight spectral analysis and activation spectral analysis are complementary: weight spectral
+shows what a layer *could* do; activation spectral shows what it *actually does* on this batch.
 
 ---
 
@@ -226,9 +251,10 @@ Tensors captured per attention layer: `q`, `k`, `v`, `qkv_out`, `o_proj_out`.
 
 | Symptom | Metrics to check | Likely cause |
 |---|---|---|
-| Loss spikes to NaN | `gradient_norm`, `exploded_gradients` | Gradient explosion — reduce LR or tighten grad clip |
-| Loss flatlines early | `gradient_snr`, `layer_cosim` | LR too high (SNR→0) or model not deep enough for the task |
-| Val loss diverges from train loss | `weight_snr` spike, `alpha` < 2 | Overfitting / memorization |
-| Loss decreases but very slowly | `alpha` 6–10, `effective_rank` near max | Under-training — increase LR or train longer |
-| GPU OOM mid-run | `gpu_memory_reserved_gb` | Reduce batch size or enable activation checkpointing |
-| Several layers show `layer_cosim` near 1.0 | `effective_rank` dropping | Representation collapse in those blocks — check LR and weight decay |
+| Loss spikes to NaN | `gradients/global/norm`, `gradients/global/exploded_gradients` | Gradient explosion — reduce LR or tighten grad clip |
+| Loss flatlines early | `gradients/global/snr`, `layer_cosim/` | LR too high (SNR→0) or model not deep enough for the task |
+| Val loss diverges from train loss | `weights/*/snr` spike, `weights/*/spectral/alpha` < 2 | Overfitting / memorization |
+| Loss decreases but very slowly | `weights/*/spectral/alpha` 6–10, `weights/*/spectral/effective_rank` near max | Under-training — increase LR or train longer |
+| GPU OOM mid-run | `system/gpu_memory_reserved_gb` | Reduce batch size or enable activation checkpointing |
+| Several layers show `layer_cosim` near 1.0 | `activations/*/spectral/effective_rank` dropping | Representation collapse in those blocks — check LR and weight decay |
+| One layer's gradient always zero | `gradients/{name}/norm` = 0 | Dead parameter — check for ReLU saturation or bad init |

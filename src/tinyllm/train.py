@@ -42,10 +42,10 @@ def run(args):
     assert (
         model_config.max_seq_len == train_config.max_seq_len
     ), f"model max_seq_len ({model_config.max_seq_len}) must equal train_config max_seq_len ({train_config.max_seq_len})"
+    precision = getattr(train_config, "precision", "bf16")
     assert not (
-        train_config.device == "cpu"
-        and getattr(train_config, "fp16_training", False)
-    ), "FP16 training is only available for CUDA devices."
+        train_config.device == "cpu" and precision in ("fp16", "bf16")
+    ), f"{precision.upper()} training requires a CUDA device."
 
     device = torch.device(train_config.device)
 

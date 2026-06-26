@@ -98,9 +98,7 @@ class AnalysisCallback(BaseCallback):
         self._grad_capture = None
         self._attn_capture = None  # ForwardHookCapture for attention metadata
         self._layer_capture = None  # ForwardHookCapture for block outputs
-        self._layer_cosim_history = (
-            []
-        )  # [(step, [cosim_per_pair])], capped at cosim_window
+        self._layer_cosim_history = []  # [(step, [cosim_per_pair])]
 
     def on_train_begin(self, **kwargs):
         model = kwargs.get("model")

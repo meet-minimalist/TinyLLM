@@ -7,7 +7,7 @@ test_file_pattern: "D:/d/DeepLearning/datasets/fineweb10b-pretokenized/fineweb_v
 num_workers: 0    # Windows CUDA + multiprocessing pagefile issue; 0 is safest
 prefetch_factor: 4
 
-packed_tokens: 1024  # must match model max_seq_len for learned PE
+packed_tokens: 1024  # 1024 tokens/step × 4 grad accum = 4096 tokens/optimizer update
 max_seq_len: 1024
 
 device: "cuda:0"
@@ -21,11 +21,12 @@ optimizer:
   adamw_betas: [0.9, 0.95]
 
 init_lr: 0.001
-warmup_steps: 0
 num_epochs: 1
-# num_training_steps: 10_000
+# Target: ~1B tokens (Chinchilla-optimal for 50M params)
+# 1B tokens / 1024 tokens per step = ~976K steps → round to 1M
+num_training_steps: 1_000_000
 lr_scheduler_type: "cosine"
-warmup_steps: 0.05 
+warmup_steps: 0.05  # 5% of num_training_steps = 50K steps
 
 label_smoothing: 0.1
 use_grad_accum: true
@@ -36,20 +37,19 @@ use_compile: false
 
 log_every: 10
 max_grad_norm: 1.0
-save_every_steps: 2000    # save checkpoint every N steps (0 = epoch-only)
+save_every_steps: 10000   # ~100 checkpoints over 1M steps
 use_wandb: true
 resume_wandb_id: null
 
 analysis:
-  every_n_steps: 50
+  every_n_steps: 2000    # ~500 analysis snapshots over 1M steps
   track_weights: true
   track_gradients: true
   track_activations: true
   track_layer_cosim: true
-  cosim_window: 50
   spectral: true
   variance_thresholds: [0.95, 0.99]
-  hist_bins: 512
+  hist_bins: 64
 
 kernels:
   use_liger: false     # requires Triton (Linux/WSL only on CUDA 12.4+; not available on Windows)
@@ -59,4 +59,4 @@ benchmarks:
   hellaswag:
     enabled: true
     num_samples: 200
-    every_n_steps: 2000
+    every_n_steps: 10000   # ~100 benchmark evals over 1M steps

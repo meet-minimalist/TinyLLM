@@ -70,9 +70,12 @@ class AnalysisCallback(BaseCallback):
         self.variance_thresholds = config.get(
             "variance_thresholds", [0.95, 0.99]
         )
-        self.activation_captures = {}
+        self.track_layer_cosim = config.get("track_layer_cosim", False)
         self._hooks = []
         self._grad_capture = None
+        self._attn_capture = None  # ForwardHookCapture for attention metadata
+        self._layer_capture = None  # ForwardHookCapture for block outputs
+        self._layer_cosim_history = []  # [(step, [cosim_per_pair])]
 
     def on_train_begin(self, **kwargs):
         model = kwargs.get("model")
@@ -82,16 +85,29 @@ class AnalysisCallback(BaseCallback):
             self._grad_capture = GradientCapture(model)
         if self.track_activations:
             self._register_activation_hooks(model)
+        if self.track_layer_cosim:
+            from src.tinyllm.analysis.activation_stats import ForwardHookCapture
+
+            self._layer_capture = ForwardHookCapture()
+            for name, module in model.named_modules():
+                if module.__class__.__name__ == "TransformerBlock":
+                    self._hooks.append(
+                        module.register_forward_hook(
+                            self._layer_capture.make_hook(name)
+                        )
+                    )
 
     def _register_activation_hooks(self, model):
-        from src.tinyllm.analysis.activation_stats import ActivationCapture
+        from src.tinyllm.analysis.activation_stats import ForwardHookCapture
 
+        self._attn_capture = ForwardHookCapture()
         for name, module in model.named_modules():
-            # Match modules named exactly "attn" (not attn_norm, attn_norm_2, etc.)
             if name.endswith(".attn") or name == "attn":
-                capture = ActivationCapture(name)
-                self.activation_captures[name] = capture
-                self._hooks.append(module.register_forward_hook(capture))
+                self._hooks.append(
+                    module.register_forward_hook(
+                        self._attn_capture.make_hook(name, unpack_metadata=True)
+                    )
+                )
 
     def on_train_step_end(self, **kwargs):
         global_step = kwargs.get("global_step", 0)
@@ -133,16 +149,16 @@ class AnalysisCallback(BaseCallback):
                         log_dict[f"weights/{name}/{k}"] = v
 
         # 3. Activation stats
-        if self.track_activations and self.activation_captures:
+        if self.track_activations and self._attn_capture is not None:
             from src.tinyllm.analysis.activation_stats import (
                 compute_activation_stats,
             )
 
             t0 = time.perf_counter()
             captures = {
-                name: cap.captured
-                for name, cap in self.activation_captures.items()
-                if cap.captured
+                name: tensors
+                for name, tensors in self._attn_capture.captured.items()
+                if tensors
             }
             if captures:
                 astats = compute_activation_stats(captures)
@@ -184,7 +200,22 @@ class AnalysisCallback(BaseCallback):
                         )
             timing_log["time/spectral"] = time.perf_counter() - t0
 
-        # 5. Timing
+        # 5. Layer-wise cosine similarity profile
+        if self.track_layer_cosim and self._layer_capture:
+            from src.tinyllm.analysis.activation_stats import (
+                compute_layer_cosine_similarities,
+            )
+
+            sims = compute_layer_cosine_similarities(
+                self._layer_capture.captured
+            )
+            self._layer_cosim_history.append((global_step, sims))
+            self._layer_capture.clear()
+
+            for i, s in enumerate(sims):
+                log_dict[f"layer_cosim/layer_{i}_to_{i + 1}"] = s
+
+        # 6. Timing
         log_dict.update(timing_log)
         logger.info(
             f"Analysis at step {global_step}: "
@@ -195,6 +226,16 @@ class AnalysisCallback(BaseCallback):
             try:
                 import wandb
 
+                if self.track_layer_cosim and self._layer_cosim_history:
+                    all_sims = [s for _, s in self._layer_cosim_history]
+                    all_steps = [st for st, _ in self._layer_cosim_history]
+                    log_dict["layer_cosim/profile"] = wandb.plot.line_series(
+                        xs=list(range(len(all_sims[0]))),
+                        ys=all_sims,
+                        keys=[f"step {st}" for st in all_steps],
+                        title="Layer-wise Cosine Similarity",
+                        xname="Layer pair (i → i+1)",
+                    )
                 wandb.log(log_dict, step=global_step)
             except ImportError:
                 pass

@@ -46,6 +46,7 @@ analysis:
   track_gradients: true
   track_activations: true
   track_layer_cosim: true
+  cosim_window: 50
   spectral: true
   variance_thresholds: [0.95, 0.99]
   hist_bins: 512

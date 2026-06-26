@@ -79,7 +79,9 @@ class AnalysisCallback(BaseCallback):
         self._grad_capture = None
         self._attn_capture = None  # ForwardHookCapture for attention metadata
         self._layer_capture = None  # ForwardHookCapture for block outputs
-        self._layer_cosim_history = []  # [(step, [cosim_per_pair])]
+        self._layer_cosim_history = (
+            []
+        )  # [(step, [cosim_per_pair])], capped at cosim_window
 
     def on_train_begin(self, **kwargs):
         model = kwargs.get("model")
@@ -238,15 +240,15 @@ class AnalysisCallback(BaseCallback):
                         np_histogram=hist
                     )
                 if self.track_layer_cosim and self._layer_cosim_history:
-                    all_sims = [s for _, s in self._layer_cosim_history]
-                    all_steps = [st for st, _ in self._layer_cosim_history]
-                    log_dict["layer_cosim/profile"] = wandb.plot.line_series(
-                        xs=list(range(len(all_sims[0]))),
-                        ys=all_sims,
-                        keys=[f"step {st}" for st in all_steps],
-                        title="Layer-wise Cosine Similarity",
-                        xname="Layer pair (i → i+1)",
-                        yname="Cosine Similarity",
+                    _n = len(self._layer_cosim_history[0][1])
+                    _cols = ["step"] + [
+                        f"layer_{i}_to_{i+1}" for i in range(_n)
+                    ]
+                    _rows = [
+                        [st] + list(s) for st, s in self._layer_cosim_history
+                    ]
+                    log_dict["layer_cosim/table"] = wandb.Table(
+                        data=_rows, columns=_cols
                     )
                 wandb.log(log_dict, step=global_step)
             except ImportError:

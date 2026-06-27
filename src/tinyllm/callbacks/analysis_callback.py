@@ -9,13 +9,22 @@ from src.tinyllm.logger.logger_utils import logger
 class GradientCapture:
     """Captures per-parameter gradient statistics during backward via hooks."""
 
-    def __init__(self, model, num_bins: int = 32, ema_beta: float = 0.99):
+    def __init__(
+        self,
+        model,
+        num_bins: int = 32,
+        ema_beta: float = 0.99,
+        ema_every: int = 10,
+    ):
         self.num_bins = num_bins
         self.ema_beta = ema_beta
-        self.stats = {}  # name -> {norm, _hist, snr}
-        self._ema = (
+        self.ema_every = ema_every  # update EMA every N optimizer steps
+        self.current_step = 0  # updated by callback in on_train_step_begin
+        self.want_hist = False  # armed by callback on analysis steps
+        self.stats = (
             {}
-        )  # name -> {mean, var} — persists across steps for SNR EMA
+        )  # name -> {norm, _hist, snr} — populated at analysis steps
+        self._ema = {}  # name -> {mean, var} — persists across steps
         self._handles = []
 
         for name, p in model.named_parameters():
@@ -24,28 +33,42 @@ class GradientCapture:
 
     def _make_hook(self, name):
         def hook(grad):
-            import numpy as np
+            do_ema = self.current_step % self.ema_every == 0
+            do_full = self.want_hist  # analysis step: need norm + histogram
+
+            if not (do_ema or do_full):
+                return  # nothing to do — no float32 conversion, no allocations
 
             g = grad.detach().float().flatten()
-            beta = self.ema_beta
 
-            # EMA of gradient mean and variance for SNR approximation
-            if name not in self._ema:
-                self._ema[name] = {
-                    "mean": torch.zeros_like(g),
-                    "var": torch.ones_like(g),
+            if do_ema:
+                beta = self.ema_beta
+                if name not in self._ema:
+                    self._ema[name] = {
+                        "mean": torch.zeros_like(g),
+                        "var": torch.ones_like(g),
+                    }
+                ema = self._ema[name]
+                new_mean = beta * ema["mean"] + (1 - beta) * g
+                new_var = beta * ema["var"] + (1 - beta) * (g - new_mean).pow(2)
+                self._ema[name] = {"mean": new_mean, "var": new_var}
+
+            if do_full:
+                import numpy as np
+
+                ema = self._ema.get(name)
+                snr = (
+                    (ema["mean"].abs() / (ema["var"].sqrt() + 1e-8))
+                    .mean()
+                    .item()
+                    if ema is not None
+                    else 0.0
+                )
+                self.stats[name] = {
+                    "norm": g.norm().item(),
+                    "_hist": np.histogram(g.cpu().numpy(), bins=self.num_bins),
+                    "snr": snr,
                 }
-            ema = self._ema[name]
-            new_mean = beta * ema["mean"] + (1 - beta) * g
-            new_var = beta * ema["var"] + (1 - beta) * (g - new_mean).pow(2)
-            self._ema[name] = {"mean": new_mean, "var": new_var}
-            snr = (new_mean.abs() / (new_var.sqrt() + 1e-8)).mean().item()
-
-            self.stats[name] = {
-                "norm": g.norm().item(),
-                "_hist": np.histogram(g.cpu().numpy(), bins=self.num_bins),
-                "snr": snr,
-            }
 
         return hook
 
@@ -94,6 +117,7 @@ class AnalysisCallback(BaseCallback):
         )
         self.track_layer_cosim = config.get("track_layer_cosim", False)
         self.hist_bins = config.get("hist_bins", 32)
+        self.ema_every = config.get("ema_every", 10)
         self._hooks = []
         self._grad_capture = None
         self._attn_capture = None  # ForwardHookCapture for attention metadata
@@ -105,7 +129,9 @@ class AnalysisCallback(BaseCallback):
         if model is None:
             return
         if self.track_gradients:
-            self._grad_capture = GradientCapture(model, num_bins=self.hist_bins)
+            self._grad_capture = GradientCapture(
+                model, num_bins=self.hist_bins, ema_every=self.ema_every
+            )
         if self.track_activations:
             self._register_activation_hooks(model)
         if self.track_layer_cosim:
@@ -131,6 +157,18 @@ class AnalysisCallback(BaseCallback):
                         self._attn_capture.make_hook(name, unpack_metadata=True)
                     )
                 )
+
+    def on_train_step_begin(self, **kwargs):
+        global_step = kwargs.get("global_step", 0)
+        if self._grad_capture is not None:
+            self._grad_capture.current_step = global_step
+            # global_step is incremented AFTER the backward pass, so the step
+            # that will be logged as N has global_step=N-1 at begin time.
+            # Arm histograms when the NEXT step number will hit the analysis interval.
+            next_step = global_step + 1
+            self._grad_capture.want_hist = (
+                next_step > 0 and next_step % self.every_n_steps == 0
+            )
 
     def on_train_step_end(self, **kwargs):
         global_step = kwargs.get("global_step", 0)
@@ -264,9 +302,10 @@ class AnalysisCallback(BaseCallback):
 
                 if self._grad_capture is not None:
                     for name, s in gstats.get("_layer_stats", {}).items():
-                        log_dict[f"gradients/{name}/hist"] = wandb.Histogram(
-                            np_histogram=s["_hist"]
-                        )
+                        if s.get("_hist") is not None:
+                            log_dict[f"gradients/{name}/hist"] = (
+                                wandb.Histogram(np_histogram=s["_hist"])
+                            )
                         log_dict[f"gradients/{name}/norm"] = s["norm"]
                         log_dict[f"gradients/{name}/snr"] = s["snr"]
                 if self.track_weights:

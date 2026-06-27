@@ -48,8 +48,8 @@ def _patch_liger(model: nn.Module) -> nn.Module:
     Patch model with liger-kernel fused Triton implementations.
 
     Swaps:
-      RMSNorm  → LigerRMSNorm  (fused RMS + scale kernel)
-      GatedFFN → LigerSwiGLUMLP  (fused SiLU(gate)*up kernel, avoids separate activation pass)
+      RMSNorm  -> LigerRMSNorm  (fused RMS + scale kernel)
+      GatedFFN -> LigerSwiGLUMLP  (fused SiLU(gate)*up kernel, avoids separate activation pass)
 
     `apply_liger_kernel_to_model` targets HuggingFace class names and won't recognize
     our custom classes, so we iterate and replace explicitly.
@@ -129,6 +129,83 @@ def try_liger_fused_ce():
         return LigerFusedLinearCrossEntropyLoss
     except ImportError:
         return None
+
+
+def audit_kernel_patches(
+    model: nn.Module, fused_ce=None, train_config=None
+) -> None:
+    """
+    Log the full optimisation status of the model — both architecture choices
+    and optional kernel patches. Inspects actual module state, not config intent.
+    """
+    from src.tinyllm.logger.logger_utils import logger
+
+    tally = {}
+    for _, module in model.named_modules():
+        cls = module.__class__.__name__
+        tally[cls] = tally.get(cls, 0) + 1
+
+    # Liger patch status
+    rms_orig = tally.get("RMSNorm", 0)
+    rms_liger = tally.get("LigerRMSNorm", 0)
+    ffn_orig = tally.get("GatedFFN", 0)
+    ffn_liger = tally.get("LigerSwiGLUMLP", 0)
+
+    def _liger(liger, orig):
+        if liger > 0 and orig == 0:
+            return f"ACTIVE ({liger} swapped)"
+        if liger == 0 and orig > 0:
+            return f"inactive ({orig} original)"
+        if liger > 0 and orig > 0:
+            return f"PARTIAL ({liger} swapped, {orig} remain)"
+        return "n/a"
+
+    # Architecture choices (from module class names)
+    has_gqa = tally.get("GroupedQueryAttention", 0) > 0
+    has_gated_ffn = (
+        tally.get("GatedFFN", 0) + tally.get("LigerSwiGLUMLP", 0)
+    ) > 0
+    has_rms = (tally.get("RMSNorm", 0) + tally.get("LigerRMSNorm", 0)) > 0
+    flash_active = any(
+        getattr(m, "flash", False)
+        for m in model.modules()
+        if hasattr(m, "flash")
+    )
+    is_compiled = hasattr(model, "_orig_mod")
+
+    # Precision from config
+    precision = "unknown"
+    if train_config is not None:
+        cfg = (
+            train_config
+            if isinstance(train_config, dict)
+            else vars(train_config) if hasattr(train_config, "__dict__") else {}
+        )
+        precision = cfg.get(
+            "precision", getattr(train_config, "precision", "unknown")
+        )
+
+    logger.info("=== Training Optimisation Status ===")
+    logger.info("  -- Architecture --")
+    logger.info(f"  Precision       : {precision}")
+    logger.info(f"  GQA             : {'ACTIVE' if has_gqa else 'inactive'}")
+    logger.info(
+        f"  SwiGLU (GatedFFN): {'ACTIVE' if has_gated_ffn else 'inactive'}"
+    )
+    logger.info(f"  RMSNorm         : {'ACTIVE' if has_rms else 'inactive'}")
+    logger.info(
+        f"  Flash Attention : {'ACTIVE' if flash_active else 'inactive'}"
+    )
+    logger.info(
+        f"  torch.compile   : {'ACTIVE' if is_compiled else 'inactive'}"
+    )
+    logger.info("  -- Liger fused kernels (Linux/Triton only) --")
+    logger.info(f"  RMSNorm fused   : {_liger(rms_liger, rms_orig)}")
+    logger.info(f"  SwiGLU fused    : {_liger(ffn_liger, ffn_orig)}")
+    logger.info(
+        f"  Fused CE loss   : {'ACTIVE' if fused_ce is not None else 'inactive'}"
+    )
+    logger.info("====================================")
 
 
 def check_kernel_status() -> dict:

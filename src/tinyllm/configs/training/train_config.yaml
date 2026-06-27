@@ -2,13 +2,15 @@ model_type: "gpt"
 exp_path: "gpt_training"
 
 mode: "varlen_packed"
+# Windows paths — on WSL2 change to: /mnt/d/d/DeepLearning/datasets/fineweb10b-pretokenized/...
 train_file_pattern: "D:/d/DeepLearning/datasets/fineweb10b-pretokenized/fineweb_train_*.bin"
 test_file_pattern: "D:/d/DeepLearning/datasets/fineweb10b-pretokenized/fineweb_val_*.bin"
-num_workers: 0    # Windows CUDA + multiprocessing pagefile issue; 0 is safest
-prefetch_factor: 4
+num_workers: 0              # Windows: 0 (CUDA multiprocessing issue) | WSL2/Linux: 4
+prefetch_factor: 2          # only active when num_workers > 0
+prefetch_queue_size: 2      # thread-based prefetch (Windows only, skipped when num_workers > 0)
 
-packed_tokens: 1024  # 1024 tokens/step × 4 grad accum = 4096 tokens/optimizer update
-max_seq_len: 1024
+packed_tokens: 2048  # 2048 tokens/step × 4 grad accum = 8192 tokens/optimizer update
+max_seq_len: 2048
 
 device: "cuda:0"
 
@@ -22,8 +24,8 @@ optimizer:
 
 init_lr: 0.001
 num_epochs: 1
-# Target: ~1B tokens (Chinchilla-optimal for 50M params)
-# 1B tokens / 1024 tokens per step = ~976K steps → round to 1M
+# Target: ~2B tokens (2× Chinchilla-optimal for 50M params; slight overtraining improves generalization)
+# 2B tokens / 2048 tokens per step = ~976K steps → round to 1M
 num_training_steps: 1_000_000
 lr_scheduler_type: "cosine"
 warmup_steps: 0.05  # 5% of num_training_steps = 50K steps
@@ -43,6 +45,7 @@ resume_wandb_id: null
 
 analysis:
   every_n_steps: 2000    # ~500 analysis snapshots over 1M steps
+  ema_every: 50          # update gradient EMA every N optimizer steps (not every backward)
   track_weights: true
   track_gradients: true
   track_activations: true
@@ -52,7 +55,7 @@ analysis:
   hist_bins: 64
 
 kernels:
-  use_liger: false     # requires Triton (Linux/WSL only on CUDA 12.4+; not available on Windows)
+  use_liger: true     # requires Triton (Linux/WSL only on CUDA 12.4+; not available on Windows)
   use_flash_attn: true  # flash-attn 2.8.3 installed; uses flash_attn_varlen_func
 
 benchmarks:

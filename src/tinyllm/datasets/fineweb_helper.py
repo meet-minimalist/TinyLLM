@@ -1,3 +1,4 @@
+import queue
 import torch
 import numpy as np
 from pathlib import Path
@@ -43,6 +44,7 @@ class DataLoaderConfig:
     bos_token: int = BOS_ID
     num_workers: int = 0
     prefetch_factor: int = 2
+    prefetch_queue_size: int = 2  # background thread queue depth (0 = disabled)
 
 
 # =============================================================================
@@ -162,11 +164,19 @@ class NanoGPTDataset(IterableDataset):
             return True
         return False
 
+    def _worker_files(self):
+        """Return the file subset this worker is responsible for."""
+        info = torch.utils.data.get_worker_info()
+        if info is None:
+            return self._files  # single-process: all files
+        # Shard files across workers so each worker reads a disjoint subset
+        return self._files[info.id :: info.num_workers]
+
     def _iter_varlen(
         self,
     ) -> Iterator[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
-        """Yields: (inputs [N], targets [N], cu_seqlens [M+1])"""
-        for file_path in self._files:
+        """Yields: (inputs [N], targets [N], cu_seqlens [M+1]) on CPU."""
+        for file_path in self._worker_files():
             if self._should_stop():
                 return
             shard = _load_data_shard_lazy(file_path)
@@ -229,21 +239,17 @@ class NanoGPTDataset(IterableDataset):
                 inputs = inputs.unsqueeze(0)
                 targets = targets.unsqueeze(0)
 
-                # Move to device
-                dev = self.cfg.device
+                # Yield CPU tensors — GPU transfer is handled by the trainer
+                # so that pin_memory + non_blocking works correctly with workers.
                 self._batch_count += 1
                 self._token_count += inputs.shape[-1]
-                yield (
-                    inputs.to(dev, non_blocking=True),
-                    targets.to(dev, non_blocking=True),
-                    cu_seqlens.to(dev, non_blocking=True),
-                )
+                yield inputs, targets, cu_seqlens
                 if self._should_stop():
                     return
 
     def _iter_fixed(self) -> Iterator[Tuple[torch.Tensor, torch.Tensor]]:
-        """Yields: (inputs [B, S], targets [B, S])"""
-        for file_path in self._files:
+        """Yields: (inputs [B, S], targets [B, S]) on CPU."""
+        for file_path in self._worker_files():
             if self._should_stop():
                 return
             shard = _load_data_shard_lazy(file_path)
@@ -261,13 +267,9 @@ class NanoGPTDataset(IterableDataset):
                 targets = buf[:, 1:]
                 pos += self.cfg.batch_size * self.cfg.seq_len
 
-                dev = self.cfg.device
                 self._batch_count += 1
                 self._token_count += inputs.numel()
-                yield (
-                    inputs.to(dev, non_blocking=True),
-                    targets.to(dev, non_blocking=True),
-                )
+                yield inputs, targets
 
     def __iter__(self) -> Iterator[Union[Tuple, Tuple]]:
         if self.cfg.mode == "varlen_packed":
@@ -279,35 +281,78 @@ class NanoGPTDataset(IterableDataset):
 
 
 # =============================================================================
+# Thread-based Prefetcher
+# =============================================================================
+class _ThreadPrefetcher:
+    """
+    Wraps any iterable and pulls batches into a fixed-size queue on a daemon
+    thread so the GPU can run the current batch while the CPU prepares the next.
+
+    Safe on Windows — uses threads, not multiprocessing, so there are no CUDA
+    context or pagefile issues.
+    """
+
+    def __init__(self, loader, queue_size: int = 2):
+        self._loader = loader
+        self._queue_size = queue_size
+
+    def __iter__(self):
+        q = queue.Queue(maxsize=self._queue_size)
+        _sentinel = object()
+
+        def _worker():
+            try:
+                for batch in self._loader:
+                    q.put(batch)
+            finally:
+                q.put(_sentinel)
+
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
+        while True:
+            item = q.get()
+            if item is _sentinel:
+                break
+            yield item
+        t.join()
+
+
+# =============================================================================
 # Factory Function
 # =============================================================================
 def create_nanogpt_dataloader(cfg: DataLoaderConfig) -> DataLoader:
     """Creates PyTorch DataLoader with config-driven behavior."""
     dataset = NanoGPTDataset(cfg)
 
-    # WSL/Linux: use 'spawn' context for CUDA compatibility
     mp_context = None
     if cfg.num_workers > 0:
-        if os.name == "nt" or "WSL" in os.uname().release:
-            # Windows/WSL: default context is usually fine
+        if os.name == "nt":
+            # Windows native: default start method is already 'spawn'
             mp_context = None
         else:
-            # Linux: use 'spawn' to avoid fork() CUDA issues
+            # Linux / WSL2: explicitly use 'spawn' — fork() after CUDA init
+            # causes undefined behaviour even when workers don't call CUDA directly
             mp_context = "spawn"
 
-    # CRITICAL: Disable pin_memory when using workers
-    # The main process will handle CPU→GPU transfer safely
-    use_pin_memory = (cfg.device == "cuda") and (cfg.num_workers == 0)
-
-    return DataLoader(
+    use_workers = cfg.num_workers > 0
+    loader = DataLoader(
         dataset,
         batch_size=None,  # dataset already yields batches
         num_workers=cfg.num_workers,
-        prefetch_factor=cfg.prefetch_factor if cfg.num_workers > 0 else None,
-        pin_memory=use_pin_memory,
-        persistent_workers=cfg.num_workers > 0,
+        prefetch_factor=cfg.prefetch_factor if use_workers else None,
+        # pin_memory only meaningful with workers: dataset yields CPU tensors,
+        # workers pin them, main process does non_blocking GPU transfer.
+        pin_memory=use_workers and cfg.device.startswith("cuda"),
+        persistent_workers=use_workers,
         multiprocessing_context=mp_context,
     )
+
+    # On Windows (num_workers=0), wrap with a thread prefetcher so the CPU
+    # packs the next batch while the GPU runs the current one.
+    # On Linux with num_workers>0, PyTorch's own prefetch_factor handles this.
+    if not use_workers and cfg.prefetch_queue_size > 0:
+        return _ThreadPrefetcher(loader, queue_size=cfg.prefetch_queue_size)
+    return loader
 
 
 if __name__ == "__main__":

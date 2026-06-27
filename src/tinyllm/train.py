@@ -10,7 +10,7 @@ from src.tinyllm.datasets.fineweb_helper import (
     create_nanogpt_dataloader,
 )
 from src.tinyllm.utils.misc import get_tokenizer, Config, get_exp_path
-from src.tinyllm.utils.kernels import apply_kernel_patches
+from src.tinyllm.utils.kernels import apply_kernel_patches, audit_kernel_patches
 from src.tinyllm.callbacks.checkpoint_callback import CheckpointCallback
 from src.tinyllm.callbacks.wandb_callback import WandbCallback
 from src.tinyllm.callbacks.analysis_callback import AnalysisCallback
@@ -63,8 +63,9 @@ def run(args):
             packed_tokens=train_config.get("packed_tokens", 8192),
             max_seq_len=train_config.get("max_seq_len", 2048),
             align_to_bos=is_train,
-            num_workers=train_config.get("num_workers", 2),
-            prefetch_factor=train_config.get("prefetch_factor", 4),
+            num_workers=train_config.get("num_workers", 0),
+            prefetch_factor=train_config.get("prefetch_factor", 2),
+            prefetch_queue_size=train_config.get("prefetch_queue_size", 2),
             max_batches=train_config.get("max_batches", 0),
             max_tokens=train_config.get("max_tokens", 0),
         )
@@ -131,6 +132,9 @@ def run(args):
         callbacks=callbacks,
     )
 
+    audit_kernel_patches(
+        model, fused_ce=trainer._fused_ce, train_config=train_config
+    )
     trainer.train()
 
 

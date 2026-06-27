@@ -82,9 +82,12 @@ class Trainer:
         if use_compile and self.device.type == "cuda":
             self.model = torch.compile(
                 self.model,
-                mode="reduce-overhead",
+                mode="default",
+                dynamic=True,  # cu_seqlens shape varies per batch (varlen packing)
             )
-            logger.info("Model compiled with torch.compile (reduce-overhead)")
+            logger.info(
+                "Model compiled with torch.compile (default, dynamic=True)"
+            )
 
         self._log_model_summary()
 
@@ -177,6 +180,13 @@ class Trainer:
         else:
             inputs, targets = batched_input
             cu_seqlens = None
+
+        # Move to device here (not in dataset) so pin_memory + non_blocking
+        # can overlap transfer with GPU compute when num_workers > 0.
+        inputs = inputs.to(self.device, non_blocking=True)
+        targets = targets.to(self.device, non_blocking=True)
+        if cu_seqlens is not None:
+            cu_seqlens = cu_seqlens.to(self.device, non_blocking=True)
 
         self.callback_handler.on_train_step_begin(
             global_step=self.global_step,

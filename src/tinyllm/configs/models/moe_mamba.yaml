@@ -1,0 +1,31 @@
+# MoE + Mamba hybrid: GQA attention, MoE FFN, Mamba SSM blocks
+model_type: "dynamic"
+tokenizer_name: "gpt2"
+
+d_model: 512
+vocab_size: 50304
+max_seq_len: 2048
+embedding: "rope_only"
+rope_scaling_type: "yarn"
+rope_scaling_factor: 2.0
+
+blocks:
+  count: 8
+  attention: "gqa"
+  num_heads: 8
+  num_kv_heads: 2
+  ffn: "moe"
+  norm: "rms"
+  ff_multiplier: 4
+  act_fn: "swish"
+  # MoE options
+  num_experts: 8
+  top_k: 2
+  expert_ffn_type: "gated"
+  z_loss_coef: 0.001
+  # Sliding window
+  window_size: 0
+
+head:
+  norm: "rms"
+  tie_weights: true

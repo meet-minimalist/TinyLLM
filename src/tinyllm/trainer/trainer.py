@@ -172,11 +172,29 @@ class Trainer:
                 or max_steps
                 or 1_000_000_000
             )
+
+        # tqdm progress bar — updated every log_every steps to avoid .item() sync overhead
+        desc = f"Epoch ?/{self.train_config.num_epochs}" if hasattr(self.train_config, "num_epochs") else "Training"
+        pbar = tqdm(
+            total=min(total, max_steps) if max_steps > 0 else total,
+            desc=desc,
+            unit="step",
+            dynamic_ncols=True,
+            mininterval=0.5,  # don't refresh faster than 2 Hz
+        )
+        self._pbar = pbar
+
         for batch_idx, batched_input in enumerate(self.train_loader):
             if max_steps and self.global_step >= max_steps:
+                pbar.set_description(f"Reached {max_steps} steps ✓")
+                pbar.close()
                 logger.info(f"Reached {max_steps} steps, stopping training")
                 return
             self._step_train(batched_input, batch_idx, total)
+            pbar.update(1)
+
+        pbar.close()
+        self._pbar = None
 
     def _step_train(self, batched_input, batch_idx, total_batches):
         if len(batched_input) == 3:
@@ -256,6 +274,7 @@ class Trainer:
         self.global_step += 1
         self.global_tokens += inputs.numel()
 
+        # Update tqdm description every log_every steps (avoids expensive .item() sync every step)
         if (batch_idx + 1) % self.log_every == 0 or (
             batch_idx + 1 == total_batches
         ):
@@ -266,11 +285,13 @@ class Trainer:
             )
             ppl = torch.exp(loss * self.iters_to_accumulate).item()
             loss_value = loss.item() * self.iters_to_accumulate
-            logger.info(
-                f"Step: {self.global_step}/{total_batches}, "
-                f"Loss: {loss_value:.4f}, PPL: {ppl:.4f}, "
-                f"LR: {lr:.6f}, Tokens: {self.global_tokens}"
-            )
+
+            # Update tqdm progress bar description
+            if hasattr(self, "_pbar") and self._pbar is not None:
+                self._pbar.set_description(
+                    f"Step {self.global_step} — Loss: {loss_value:.4f}, "
+                    f"PPL: {ppl:.2f}, LR: {lr:.2e}, Tok: {self.global_tokens}"
+                )
 
             self.callback_handler.on_train_step_end(
                 global_step=self.global_step,

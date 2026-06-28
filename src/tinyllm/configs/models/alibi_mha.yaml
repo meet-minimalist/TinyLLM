@@ -1,0 +1,21 @@
+# ALiBi + MHA: no learned position embeddings, uses ALiBi bias instead
+model_type: "dynamic"
+tokenizer_name: "gpt2"
+
+d_model: 512
+vocab_size: 50304
+max_seq_len: 2048
+embedding: "alibi"
+
+blocks:
+  count: 8
+  attention: "mha"
+  ffn: "standard"
+  norm: "layer_norm"
+  num_heads: 8
+  ff_multiplier: 4
+  window_size: 0
+
+head:
+  norm: "layer_norm"
+  tie_weights: true

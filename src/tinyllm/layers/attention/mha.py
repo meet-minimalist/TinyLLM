@@ -69,6 +69,7 @@ class MHA(nn.Module):
         num_heads: int,
         drop_prob: float = 0.0,
         flash: bool = False,
+        window_size: int = 0,
         **kwargs
     ):
         super().__init__()
@@ -78,6 +79,7 @@ class MHA(nn.Module):
         self.head_dim = emb_dim // num_heads
         self.scale = self.head_dim**-0.5
         self.flash = flash
+        self.window_size = window_size  # 0 = no sliding window
 
         self.qkv_gen = QKVGen(emb_dim, num_heads)
         self.out_proj = nn.Linear(emb_dim, emb_dim)

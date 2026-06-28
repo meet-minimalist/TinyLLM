@@ -42,7 +42,10 @@ class DynamicModel(BaseLLM):
         if embed_type == "rope_only":
             head_dim = d_model // num_heads
             self.rope = RotaryPositionalEmbedding(
-                head_dim=head_dim, max_seq_len=max_seq_len
+                head_dim=head_dim,
+                max_seq_len=max_seq_len,
+                scaling_type=cfg.get("rope_scaling_type"),
+                scaling_factor=cfg.get("rope_scaling_factor", 1.0),
             )
         else:
             self.rope = None

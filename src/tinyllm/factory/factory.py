@@ -20,7 +20,10 @@ def optimizer_factory(model, train_config):
         from src.tinyllm.optimizer.muon import build_muon_adamw_optimizer
 
         opt_cfg = train_config.get("optimizer", {})
-        logger.info("Using Muon + AdamW hybrid optimizer")
+        use_8bit = opt_cfg.get("adamw_8bit", False)
+        logger.info(
+            f"Using Muon + {'8-bit ' if use_8bit else ''}AdamW hybrid optimizer"
+        )
         return build_muon_adamw_optimizer(
             model,
             muon_lr=opt_cfg.get("muon_lr", 0.0002),
@@ -30,6 +33,7 @@ def optimizer_factory(model, train_config):
             weight_decay=opt_cfg.get("weight_decay", 0.1),
             momentum=opt_cfg.get("muon_momentum", 0.95),
             adamw_betas=opt_cfg.get("adamw_betas", (0.9, 0.95)),
+            use_8bit=use_8bit,
         )
 
     import torch

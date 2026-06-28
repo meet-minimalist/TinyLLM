@@ -121,6 +121,7 @@ class AnalysisCallback(BaseCallback):
         self._hooks = []
         self._grad_capture = None
         self._attn_capture = None  # ForwardHookCapture for attention metadata
+        self._ffn_capture = None  # ForwardHookCapture for FFN metadata
         self._layer_capture = None  # ForwardHookCapture for block outputs
         self._layer_cosim_history = []  # [(step, [cosim_per_pair])]
 
@@ -150,11 +151,18 @@ class AnalysisCallback(BaseCallback):
         from src.tinyllm.analysis.activation_stats import ForwardHookCapture
 
         self._attn_capture = ForwardHookCapture()
+        self._ffn_capture = ForwardHookCapture()
         for name, module in model.named_modules():
             if name.endswith(".attn") or name == "attn":
                 self._hooks.append(
                     module.register_forward_hook(
                         self._attn_capture.make_hook(name, unpack_metadata=True)
+                    )
+                )
+            if name.endswith(".ffn") or name == "ffn":
+                self._hooks.append(
+                    module.register_forward_hook(
+                        self._ffn_capture.make_hook(name, unpack_metadata=False)
                     )
                 )
 
@@ -218,20 +226,32 @@ class AnalysisCallback(BaseCallback):
             wstats = compute_weight_stats(model, num_bins=self.hist_bins)
             timing_log["time/weight_stats"] = time.perf_counter() - t0
 
-        # 3. Activation histograms
+        # 3. Activation histograms (attention + FFN)
         activation_hists = {}
-        if self.track_activations and self._attn_capture is not None:
+        if self.track_activations:
             import numpy as np
 
             t0 = time.perf_counter()
-            for layer_name, tensors in self._attn_capture.captured.items():
-                for tensor_name, tensor in tensors.items():
-                    key = f"{layer_name}/{tensor_name}"
-                    activation_hists[key] = np.histogram(
-                        tensor.cpu().float().flatten().numpy(),
-                        bins=self.hist_bins,
-                    )
-            self._attn_capture.clear()
+            # Attention activation histograms
+            if self._attn_capture is not None:
+                for layer_name, tensors in self._attn_capture.captured.items():
+                    for tensor_name, tensor in tensors.items():
+                        key = f"attn/{layer_name}/{tensor_name}"
+                        activation_hists[key] = np.histogram(
+                            tensor.cpu().float().flatten().numpy(),
+                            bins=self.hist_bins,
+                        )
+                self._attn_capture.clear()
+            # FFN activation histograms
+            if self._ffn_capture is not None:
+                for layer_name, tensor in self._ffn_capture.captured.items():
+                    if isinstance(tensor, torch.Tensor):
+                        key = f"ffn/{layer_name}/output"
+                        activation_hists[key] = np.histogram(
+                            tensor.cpu().float().flatten().numpy(),
+                            bins=self.hist_bins,
+                        )
+                self._ffn_capture.clear()
             timing_log["time/activation_stats"] = time.perf_counter() - t0
 
         # 4. Spectral analysis
@@ -321,17 +341,42 @@ class AnalysisCallback(BaseCallback):
                     log_dict[f"activations/{key}/hist"] = wandb.Histogram(
                         np_histogram=hist
                     )
-                if self.track_activations and self._attn_capture is not None:
+                if self.track_activations:
                     from src.tinyllm.analysis.spectral import (
                         compute_svd_and_variance,
                     )
 
-                    for (
-                        layer_name,
-                        tensors,
-                    ) in self._attn_capture.captured.items():
-                        for tensor_name, tensor in tensors.items():
-                            if tensor is None or tensor.ndim < 2:
+                    # Attention activation spectral
+                    if self._attn_capture is not None:
+                        for (
+                            layer_name,
+                            tensors,
+                        ) in self._attn_capture.captured.items():
+                            for tensor_name, tensor in tensors.items():
+                                if tensor is None or tensor.ndim < 2:
+                                    continue
+                                try:
+                                    t2d = (
+                                        tensor.detach()
+                                        .float()
+                                        .view(-1, tensor.shape[-1])
+                                    )
+                                    result = compute_svd_and_variance(
+                                        t2d, thresholds=[]
+                                    )
+                                    key = f"activations/attn/{layer_name}/{tensor_name}"
+                                    log_dict[f"{key}/spectral/stable_rank"] = (
+                                        result["stable_rank"]
+                                    )
+                                    log_dict[f"{key}/spectral/effective_rank"] = (
+                                        result["effective_rank"]
+                                    )
+                                except Exception:
+                                    pass
+                    # FFN activation spectral
+                    if self._ffn_capture is not None:
+                        for layer_name, tensor in self._ffn_capture.captured.items():
+                            if not isinstance(tensor, torch.Tensor) or tensor.ndim < 2:
                                 continue
                             try:
                                 t2d = (
@@ -342,7 +387,7 @@ class AnalysisCallback(BaseCallback):
                                 result = compute_svd_and_variance(
                                     t2d, thresholds=[]
                                 )
-                                key = f"activations/{layer_name}/{tensor_name}"
+                                key = f"activations/ffn/{layer_name}/output"
                                 log_dict[f"{key}/spectral/stable_rank"] = (
                                     result["stable_rank"]
                                 )

@@ -2,6 +2,8 @@
 Rotary Positional Embedding (RoPE) implementation.
 """
 
+import math
+
 import torch
 import torch.nn as nn
 
@@ -10,26 +12,90 @@ class RotaryPositionalEmbedding(nn.Module):
     """Rotary Positional Embedding (RoPE)."""
 
     def __init__(
-        self, head_dim: int, max_seq_len: int = 2048, base: int = 10000
+        self,
+        head_dim: int,
+        max_seq_len: int = 2048,
+        base: int = 10000,
+        scaling_type: str = None,
+        scaling_factor: float = 1.0,
+        original_max_seq_len: int = None,
     ):
         """
-        Initialize RoPE.
+        Initialize RoPE, optionally with YaRN/LongRoPE scaling.
 
         Args:
             head_dim: Dimension of each attention head.
             max_seq_len: Maximum sequence length.
             base: Base frequency for RoPE.
+            scaling_type: None (no scaling), "yarn" (YaRN), or "longrope".
+            scaling_factor: Extension factor. >1 extends context length.
+            original_max_seq_len: Original max_seq_len before scaling
+                (used for YaRN ramp). Defaults to max_seq_len / scaling_factor.
         """
         super().__init__()
         assert head_dim % 2 == 0, "Head dimension must be even for RoPE"
 
         self.head_dim = head_dim
         self.max_seq_len = max_seq_len
+        self.scaling_type = scaling_type
+        self.scaling_factor = scaling_factor
 
-        # Precompute frequency tensor
-        inv_freq = 1.0 / (
-            base ** (torch.arange(0, head_dim, 2).float() / head_dim)
+        # Original max length before scaling
+        self.original_max_seq_len = original_max_seq_len or int(
+            max_seq_len / max(scaling_factor, 1.0)
         )
+
+        if scaling_type == "yarn":
+            # YaRN: interpolate frequencies with a ramp
+            self._init_yarn(base)
+        elif scaling_type == "longrope":
+            # LongRoPE: same interpolation, different beta scheduling
+            self._init_longrope(base)
+        else:
+            # Standard RoPE
+            inv_freq = 1.0 / (
+                base ** (torch.arange(0, head_dim, 2).float() / head_dim)
+            )
+            self.register_buffer("inv_freq", inv_freq, persistent=False)
+
+    def _init_yarn(self, base: int):
+        """Initialize YaRN-scaled frequencies with ramp."""
+        import numpy as np
+
+        dim = self.head_dim // 2
+        inv_freq = 1.0 / (
+            base ** (torch.arange(0, self.head_dim, 2).float() / self.head_dim)
+        )
+
+        # YaRN ramp: lower frequencies keep original, higher frequencies interpolate
+        ramp_ratio = min(
+            1.0, self.original_max_seq_len / self.max_seq_len
+        )
+        ramp = torch.linspace(0, 1, steps=dim)
+        ramp = 1.0 - (1.0 - ramp) / ramp_ratio
+        ramp.clamp_(min=0.0, max=1.0)
+
+        # Smooth interpolation between standard and scaled
+        inv_freq_scaled = inv_freq / self.scaling_factor
+        inv_freq = (1.0 - ramp) * inv_freq_scaled + ramp * inv_freq
+
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+        self.register_buffer("_yarn_ramp", ramp, persistent=False)
+
+    def _init_longrope(self, base: int):
+        """Initialize LongRoPE-scaled frequencies."""
+        # LongRoPE uses a similar approach to YaRN with different beta scheduling
+        dim = self.head_dim // 2
+        inv_freq = 1.0 / (
+            base ** (torch.arange(0, self.head_dim, 2).float() / self.head_dim)
+        )
+
+        # Beta schedule for LongRoPE
+        ratio = self.original_max_seq_len / self.max_seq_len
+        t = torch.arange(dim, dtype=torch.float) / max(1, dim - 1)
+        beta = 1.0 - (1.0 - ratio) * (1.0 - t**2)
+
+        inv_freq = inv_freq / beta.clamp(min=0.1)
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
     def forward(

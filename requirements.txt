@@ -10,25 +10,7 @@
 torch==2.11.0+cu130
 
 # ==============================================================================
-# 3. PLATFORM SPECIFIC DEPENDENCIES (Windows vs. Linux/WSL2)
-# ==============================================================================
-# Triton (required by Liger — no official Windows build; use triton-windows as workaround)
-triton-windows>=3.7.0 ; sys_platform == 'win32'
-triton>=3.7.0         ; sys_platform == 'linux'
-
-# Flash Attention
-# Windows: pre-built wheel (compiling from source on Windows is not supported)
-https://huggingface.co/Sumitc13/flash-attn-windows-wheels/resolve/main/flash_attn-2.8.3%2Bcu130torch2.11-cp312-cp312-win_amd64.whl ; sys_platform == 'win32' and python_version == '3.12'
-# Linux/WSL2: compiles from source — takes ~10 min; requires CUDA toolkit (nvcc) in WSL2
-flash-attn==2.8.3 ; sys_platform == 'linux'
-
-# Liger fused kernels (RMSNorm, SwiGLU, CE loss — active when use_liger: true in config)
-# Requires Triton; works on Linux/WSL2 out of the box.
-# Windows: works only if triton-windows is installed successfully.
-liger-kernel>=0.8.0
-
-# ==============================================================================
-# 4. STANDARD UTILITIES & ECOSYSTEM LIBRARIES
+# 3. STANDARD UTILITIES & ECOSYSTEM LIBRARIES
 # ==============================================================================
 datasets>=5.0.0
 numpy>=1.24.1

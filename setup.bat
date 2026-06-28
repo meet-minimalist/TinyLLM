@@ -48,21 +48,39 @@ if %errorlevel% neq 0 (
     exit /b %errorlevel%
 )
 
-:: 5. Inject Liger Kernel with dependency checking disabled
-echo Safely installing liger-kernel without conflicting dependencies...
-pip install "liger-kernel>=0.5.0" --no-deps
+:: 5. cut-cross-entropy — fused linear+CE loss (Windows-compatible, no Triton needed)
+::    --no-deps: prevents it from pulling in a CPU torch from PyPI over our CUDA build.
+echo Installing cut-cross-entropy (no-deps)...
+pip install --no-deps "cut-cross-entropy>=25.1.1"
 if %errorlevel% neq 0 (
-    echo ERROR: Installation of liger-kernel failed.
+    echo ERROR: cut-cross-entropy installation failed.
     exit /b %errorlevel%
 )
 
-:: 6. Install flash-attn (optional, for varlen flash attention)
-echo Installing flash-attn (optional)...
-pip install flash-attn
+:: 7. Triton for Windows (required by Liger)
+echo Installing triton-windows...
+pip install "triton-windows>=3.7.0"
 if %errorlevel% neq 0 (
-    echo ERROR: Installation of flash-attn failed.
+    echo ERROR: triton-windows installation failed.
     exit /b %errorlevel%
 )
 
-echo 🎉 Windows Installation Completed Successfully!
+:: 8. Liger fused kernels (RMSNorm, SwiGLU, fused CE loss)
+echo Installing liger-kernel...
+pip install "liger-kernel>=0.8.0"
+if %errorlevel% neq 0 (
+    echo ERROR: liger-kernel installation failed.
+    exit /b %errorlevel%
+)
+
+:: 9. Flash Attention — pre-built Windows wheel (Python 3.12, CUDA 13.0, torch 2.11)
+::    Compiling from source is not supported on Windows.
+echo Installing flash-attn (Windows pre-built wheel)...
+pip install "https://huggingface.co/Sumitc13/flash-attn-windows-wheels/resolve/main/flash_attn-2.8.3%%2Bcu130torch2.11-cp312-cp312-win_amd64.whl"
+if %errorlevel% neq 0 (
+    echo ERROR: flash-attn installation failed.
+    exit /b %errorlevel%
+)
+
+echo Windows Installation Completed Successfully!
 endlocal

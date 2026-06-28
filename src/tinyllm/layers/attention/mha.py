@@ -9,23 +9,56 @@ from src.tinyllm.models.base import make_block_causal_mask
 from src.tinyllm.models.layers.generate_qkv import QKVGen
 from src.tinyllm.models.layers.rope import apply_rotary_pos_emb
 
-# Lazy flag — set once at first forward to avoid repeated failed imports
-_HAS_FLASH_ATTN_PKG: Optional[bool] = None
+# Lazy flags — checked once at first forward to avoid repeated failed imports
+_HAS_FLASH_ATTN: Optional[bool] = None
+_HAS_FLEX_ATTN: Optional[bool] = None
 
 
-def _check_flash_attn_pkg() -> bool:
-    global _HAS_FLASH_ATTN_PKG
-    if _HAS_FLASH_ATTN_PKG is None:
+def _check_flash_attn() -> bool:
+    global _HAS_FLASH_ATTN
+    if _HAS_FLASH_ATTN is None:
         try:
-            import flash_attn  # noqa: F401
+            from flash_attn import flash_attn_varlen_func  # noqa: F401
 
-            _HAS_FLASH_ATTN_PKG = True
+            _HAS_FLASH_ATTN = True
+        except (ImportError, AttributeError):
+            _HAS_FLASH_ATTN = False
+    return _HAS_FLASH_ATTN
+
+
+def _check_flex_attn() -> bool:
+    global _HAS_FLEX_ATTN
+    if _HAS_FLEX_ATTN is None:
+        try:
+            from torch.nn.attention.flex_attention import (
+                flex_attention,
+                create_block_mask,
+            )  # noqa: F401
+
+            _HAS_FLEX_ATTN = True
         except ImportError:
-            print(
-                "flash_attn package not found. Flash attention will not be used."
-            )
-            _HAS_FLASH_ATTN_PKG = False
-    return _HAS_FLASH_ATTN_PKG
+            _HAS_FLEX_ATTN = False
+    return _HAS_FLEX_ATTN
+
+
+def _make_doc_block_mask(cu_seqlens: torch.Tensor, seq_len: int):
+    from torch.nn.attention.flex_attention import create_block_mask
+
+    doc_ids = torch.zeros(seq_len, dtype=torch.long, device=cu_seqlens.device)
+    for i in range(len(cu_seqlens) - 1):
+        doc_ids[cu_seqlens[i] : cu_seqlens[i + 1]] = i
+
+    def mask_fn(b, h, q_idx, kv_idx):
+        return (q_idx >= kv_idx) & (doc_ids[q_idx] == doc_ids[kv_idx])
+
+    return create_block_mask(
+        mask_fn,
+        B=None,
+        H=None,
+        Q_LEN=seq_len,
+        KV_LEN=seq_len,
+        device=cu_seqlens.device,
+    )
 
 
 @LAYER_REGISTRY.register("mha")
@@ -65,8 +98,8 @@ class MHA(nn.Module):
 
         B, H, S, D = q.shape
 
-        if self.flash and cu_seqlens is not None and _check_flash_attn_pkg():
-            # ---- flash_attn varlen API (requires flash-attn package) ----
+        if self.flash and cu_seqlens is not None and _check_flash_attn():
+            # ---- Tier 1: flash_attn varlen API ----
             from flash_attn import flash_attn_varlen_func
 
             q_flat = q.transpose(1, 2).reshape(-1, H, D)
@@ -89,8 +122,20 @@ class MHA(nn.Module):
             )
             attn_out = attn_out.reshape(B, S, H, D).transpose(1, 2)
             attn_weights = None
+
+        elif self.flash and cu_seqlens is not None and _check_flex_attn():
+            # ---- Tier 2: flex_attention with document block mask ----
+            # PyTorch-native Triton kernels; no external package needed.
+            from torch.nn.attention.flex_attention import flex_attention
+
+            block_mask = _make_doc_block_mask(cu_seqlens, S)
+            attn_out = flex_attention(
+                q, k, v, block_mask=block_mask, scale=self.scale
+            )
+            attn_weights = None
+
         else:
-            # ---- F.scaled_dot_product_attention with optional block mask ----
+            # ---- Tier 3: F.scaled_dot_product_attention fallback ----
             if cu_seqlens is not None:
                 attn_mask = make_block_causal_mask(cu_seqlens)
             else:

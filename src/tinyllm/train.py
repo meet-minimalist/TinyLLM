@@ -131,9 +131,11 @@ def run(args):
         device=device,
         callbacks=callbacks,
     )
+    # After trainer construction, use trainer.model instead of model, since
+    # model object is compiled using torch.compile.
 
     audit_kernel_patches(
-        model, fused_ce=trainer._fused_ce, train_config=train_config
+        trainer.model, fused_ce=trainer._fused_ce, train_config=train_config
     )
     trainer.train()
 

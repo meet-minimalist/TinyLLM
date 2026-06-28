@@ -3,6 +3,55 @@
 # Exit immediately if a command exits with a non-zero status
 set -e
 
+# Detect WSL2
+IS_WSL=false
+if grep -qi "microsoft" /proc/version 2>/dev/null; then
+    IS_WSL=true
+    echo "WSL2 detected."
+fi
+
+# CUDA version required by the torch build in requirements.txt (cu130 = 13.0)
+REQUIRED_CUDA_MAJOR=13
+REQUIRED_CUDA_MINOR=0
+
+# Check CUDA toolkit version before doing anything else
+check_cuda_version() {
+    # Try to put the standard CUDA path on PATH if nvcc isn't found
+    if ! command -v nvcc &>/dev/null; then
+        export PATH=/usr/local/cuda/bin:$PATH
+    fi
+
+    if ! command -v nvcc &>/dev/null; then
+        echo "ERROR: nvcc not found. Install CUDA toolkit ${REQUIRED_CUDA_MAJOR}.${REQUIRED_CUDA_MINOR} first:"
+        echo "  sudo apt install -y cuda-toolkit-${REQUIRED_CUDA_MAJOR}-${REQUIRED_CUDA_MINOR}"
+        echo "  export PATH=/usr/local/cuda-${REQUIRED_CUDA_MAJOR}.${REQUIRED_CUDA_MINOR}/bin:\$PATH"
+        exit 1
+    fi
+
+    # Parse major.minor from nvcc output, e.g. "Cuda compilation tools, release 13.0, V13.0.90"
+    CUDA_VERSION=$(nvcc --version | grep -oP 'release \K[0-9]+\.[0-9]+')
+    CUDA_MAJOR=$(echo "$CUDA_VERSION" | cut -d. -f1)
+    CUDA_MINOR=$(echo "$CUDA_VERSION" | cut -d. -f2)
+
+    echo "Detected CUDA toolkit: ${CUDA_VERSION}"
+    echo "Required CUDA toolkit: ${REQUIRED_CUDA_MAJOR}.${REQUIRED_CUDA_MINOR}"
+
+    if [ "$CUDA_MAJOR" -ne "$REQUIRED_CUDA_MAJOR" ] || [ "$CUDA_MINOR" -lt "$REQUIRED_CUDA_MINOR" ]; then
+        echo "ERROR: CUDA version mismatch."
+        echo "  Found   : ${CUDA_VERSION}"
+        echo "  Required: >=${REQUIRED_CUDA_MAJOR}.${REQUIRED_CUDA_MINOR} (matches torch+cu130 in requirements.txt)"
+        echo ""
+        echo "To fix: install the correct toolkit and retry:"
+        echo "  sudo apt install -y cuda-toolkit-${REQUIRED_CUDA_MAJOR}-${REQUIRED_CUDA_MINOR}"
+        echo "  export PATH=/usr/local/cuda-${REQUIRED_CUDA_MAJOR}.${REQUIRED_CUDA_MINOR}/bin:\$PATH"
+        exit 1
+    fi
+
+    echo "CUDA version check passed."
+}
+
+check_cuda_version
+
 # Default behavior variables
 VENV_PATH=""
 CREATE_NEW=false
@@ -47,12 +96,23 @@ pip cache purge
 echo "Installing base requirements.txt..."
 pip install -r requirements.txt
 
-# 5. Inject Liger Kernel with dependency checking disabled
-echo "Safely installing liger-kernel without conflicting dependencies..."
-pip install "liger-kernel>=0.5.0" --no-deps
+# 5. cut-cross-entropy — fused linear+CE loss (no Triton needed)
+# --no-deps: prevents it from pulling in a CPU torch from PyPI over our CUDA build.
+echo "Installing cut-cross-entropy (no-deps)..."
+pip install --no-deps "cut-cross-entropy>=25.1.1"
 
-# 6. Install flash-attn (optional, for varlen flash attention)
-echo "Installing flash-attn (optional)..."
-pip install flash-attn
+# 7. Triton (required by Liger)
+echo "Installing triton..."
+pip install "triton>=3.7.0"
 
-echo "🎉 Installation Completed Successfully!"
+# 8. Liger fused kernels (RMSNorm, SwiGLU, fused CE loss)
+echo "Installing liger-kernel..."
+pip install "liger-kernel>=0.8.0"
+
+# 9. Flash Attention
+# PyTorch 2.11 SDPA uses FA2 internally via cuDNN on Ampere — no separate
+# flash-attn package needed. If you have a compatible pre-built wheel, install
+# it here and set use_flash_attn: true in train_config.yaml to use the varlen API.
+# pip install "<wheel-url>"
+
+echo "Installation Completed Successfully!"

@@ -42,29 +42,29 @@ class Trainer:
         else:
             self.scaler = None
 
-        # Fused linear+CE loss via Liger (avoids materializing [S, vocab] logits).
-        # Only active when use_liger=true in kernels config.
-        self._fused_ce = None
+        # Fused linear+CE loss — avoids materializing [S, vocab] logits.
+        # Tries Liger (Linux) then cut-cross-entropy (Windows); falls back to standard CE.
+        from src.tinyllm.utils.kernels import try_fused_ce
+
+        label_smoothing = (
+            train_config.get("label_smoothing", 0.0)
+            if hasattr(train_config, "get")
+            else getattr(train_config, "label_smoothing", 0.0)
+        )
         kernels_cfg = (
             train_config.get("kernels", {})
             if hasattr(train_config, "get")
             else getattr(train_config, "kernels", {})
+        ) or {}
+        self._fused_ce, _backend = try_fused_ce(
+            ignore_index=tokenizer.pad_token_id,
+            label_smoothing=label_smoothing,
+            use_liger=kernels_cfg.get("use_liger", False),
         )
-        if kernels_cfg and kernels_cfg.get("use_liger", False):
-            from src.tinyllm.utils.kernels import try_liger_fused_ce
-
-            fused_cls = try_liger_fused_ce()
-            if fused_cls is not None:
-                label_smoothing = (
-                    train_config.get("label_smoothing", 0.0)
-                    if hasattr(train_config, "get")
-                    else getattr(train_config, "label_smoothing", 0.0)
-                )
-                self._fused_ce = fused_cls(
-                    ignore_index=tokenizer.pad_token_id,
-                    label_smoothing=label_smoothing,
-                )
-                logger.info("Using Liger FusedLinearCrossEntropyLoss")
+        if self._fused_ce is not None:
+            logger.info(f"Using fused linear+CE loss (backend: {_backend})")
+        else:
+            logger.info("Fused CE not available; using standard cross-entropy.")
 
         self.grad_accum = getattr(train_config, "use_grad_accum", False)
         self.iters_to_accumulate = getattr(
@@ -80,6 +80,10 @@ class Trainer:
 
         use_compile = getattr(train_config, "use_compile", True)
         if use_compile and self.device.type == "cuda":
+            # suppress_errors=True: allows graph breaks on ops torch.compile can't
+            # trace (e.g. Liger's custom autograd functions in PyTorch 2.11).
+            # Those ops run in eager; everything else is compiled.
+            torch._dynamo.config.suppress_errors = True
             self.model = torch.compile(
                 self.model,
                 mode="default",
@@ -203,8 +207,16 @@ class Trainer:
                 )
                 B, S, D = hidden.shape
                 lm_weight = self.model.lm_head.weight
+                # RMSNorm outputs fp32 even under autocast; CCE backward requires bf16/fp16.
+                amp_dtype = (
+                    torch.bfloat16
+                    if self.precision == "bf16"
+                    else torch.float16
+                )
                 loss = self._fused_ce(
-                    hidden.view(B * S, D), lm_weight, targets.view(B * S)
+                    hidden.view(B * S, D).to(amp_dtype),
+                    lm_weight,
+                    targets.view(B * S),
                 )
             else:
                 logits = self.model(inputs, cu_seqlens=cu_seqlens)

@@ -2,10 +2,15 @@ model_type: "gpt"
 exp_path: "gpt_training"
 
 mode: "varlen_packed"
-# Windows paths — on WSL2 change to: /mnt/d/d/DeepLearning/datasets/fineweb10b-pretokenized/...
-train_file_pattern: "D:/d/DeepLearning/datasets/fineweb10b-pretokenized/fineweb_train_*.bin"
-test_file_pattern: "D:/d/DeepLearning/datasets/fineweb10b-pretokenized/fineweb_val_*.bin"
-num_workers: 0              # Windows: 0 (CUDA multiprocessing issue) | WSL2/Linux: 4
+# Windows paths:
+# train_file_pattern: "D:/d/DeepLearning/datasets/fineweb10b-pretokenized/fineweb_train_*.bin"
+# test_file_pattern: "D:/d/DeepLearning/datasets/fineweb10b-pretokenized/fineweb_val_*.bin"
+# WSL2 paths (uncomment and comment above):
+train_file_pattern: "/mnt/d/d/DeepLearning/datasets/fineweb10b-pretokenized/fineweb_train_*.bin"
+test_file_pattern: "/mnt/d/d/DeepLearning/datasets/fineweb10b-pretokenized/fineweb_val_*.bin"
+
+# num_workers: 0              # Windows: 0 | WSL2/Linux: 4
+num_workers: 4              # Windows: 0 | WSL2/Linux: 4
 prefetch_factor: 2          # only active when num_workers > 0
 prefetch_queue_size: 2      # thread-based prefetch (Windows only, skipped when num_workers > 0)
 
@@ -30,7 +35,7 @@ num_training_steps: 1_000_000
 lr_scheduler_type: "cosine"
 warmup_steps: 0.05  # 5% of num_training_steps = 50K steps
 
-label_smoothing: 0.1
+label_smoothing: 0.0    # >0 to enable label smoothing (not compatible with CCE fused CE kernel)
 use_grad_accum: true
 iters_to_accumulate: 4
 
@@ -55,8 +60,8 @@ analysis:
   hist_bins: 64
 
 kernels:
-  use_liger: true     # requires Triton (Linux/WSL only on CUDA 12.4+; not available on Windows)
-  use_flash_attn: true  # flash-attn 2.8.3 installed; uses flash_attn_varlen_func
+  use_liger: false     # requires Triton (Linux/WSL only on CUDA 12.4+; not available on Windows)
+  use_flash_attn: true   # tier 1: flash_attn_varlen_func | tier 2: flex_attention | tier 3: SDPA
 
 benchmarks:
   hellaswag:

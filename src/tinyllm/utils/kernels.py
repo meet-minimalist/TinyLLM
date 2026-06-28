@@ -10,8 +10,14 @@ Currently supported:
 All imports are lazy — these packages are NOT required.
 """
 
+import os
+
 import torch
 import torch.nn as nn
+
+# Liger requires Triton, which has no official Windows build.
+# triton-windows exists but doesn't support all Liger ops (BF16 fused CE fails).
+_LIGER_SUPPORTED = os.name != "nt"
 
 
 def apply_kernel_patches(model: nn.Module, config: dict) -> nn.Module:
@@ -20,7 +26,7 @@ def apply_kernel_patches(model: nn.Module, config: dict) -> nn.Module:
 
     Called after model construction in train.py.
     Config keys under 'kernels':
-        use_liger: bool   — patch with liger-kernel fused ops
+        use_liger: bool   — patch with liger-kernel fused ops (Linux/WSL2 only)
         use_flash_attn: bool  — uses F.scaled_dot_product_attention
             (handled per-layer via the `flash` parameter, not here)
 
@@ -35,7 +41,14 @@ def apply_kernel_patches(model: nn.Module, config: dict) -> nn.Module:
         return model
 
     if cfg.get("use_liger", False):
-        model = _patch_liger(model)
+        if _LIGER_SUPPORTED:
+            model = _patch_liger(model)
+        else:
+            from src.tinyllm.logger.logger_utils import logger
+
+            logger.warning(
+                "Liger kernels skipped on Windows (triton-windows does not support all ops)."
+            )
 
     if cfg.get("use_flash_attn", False):
         _patch_attention_flash(model)
@@ -95,24 +108,39 @@ def _patch_liger(model: nn.Module) -> nn.Module:
 
 def _patch_attention_flash(model: nn.Module):
     """Sets flash=True on all attention modules in the model."""
-    has_pkg = False
+    # Check for flash_attn_varlen_func specifically — not just the package.
+    # FA4 installs as flash_attn but without this function; flex_attention
+    # is the fallback in that case (checked at forward time in gqa/mha).
+    has_varlen = False
     try:
-        import flash_attn  # noqa: F401
+        from flash_attn import flash_attn_varlen_func  # noqa: F401
 
-        has_pkg = True
-    except ImportError:
-        print("flash_attn package not found. Flash attention will not be used.")
+        has_varlen = True
+    except (ImportError, AttributeError):
         pass
-    if not has_pkg:
-        return
+
+    has_flex = False
+    try:
+        from torch.nn.attention.flex_attention import (
+            flex_attention,
+        )  # noqa: F401
+
+        has_flex = True
+    except ImportError:
+        pass
+
+    if not has_varlen and not has_flex:
+        print(
+            "Neither flash_attn nor flex_attention available; using SDPA fallback."
+        )
+
     for module in model.modules():
         if hasattr(module, "flash"):
             module.flash = True
 
 
 def try_liger_fused_ce():
-    """
-    Return liger-kernel's LigerFusedLinearCrossEntropyLoss if available.
+    """Return LigerFusedLinearCrossEntropyLoss class if available (Linux/Triton only).
 
     Fuses lm_head matmul + softmax + cross-entropy in one Triton kernel,
     never materializing the [S, vocab_size] logits tensor. Saves ~50% peak
@@ -123,12 +151,67 @@ def try_liger_fused_ce():
       - lm_head_weight:  [vocab_size, d_model]
       - labels:          [B*S]  (flat target token ids)
     """
+    if not _LIGER_SUPPORTED:
+        return None
     try:
         from liger_kernel.transformers import LigerFusedLinearCrossEntropyLoss
 
         return LigerFusedLinearCrossEntropyLoss
     except ImportError:
         return None
+
+
+class _CCEFusedCELoss:
+    """
+    Wraps cut-cross-entropy's linear_cross_entropy to match Liger's call signature.
+
+    Fuses lm_head matmul + softmax + CE without materializing [S, vocab] logits.
+    Works on Windows (no Triton required).
+    """
+
+    def __init__(self, ignore_index=-100, label_smoothing=0.0):
+        self.ignore_index = ignore_index
+        self.label_smoothing = label_smoothing
+
+    def __call__(self, hidden, weight, labels):
+        from cut_cross_entropy import linear_cross_entropy
+
+        return linear_cross_entropy(
+            hidden, weight, labels, ignore_index=self.ignore_index
+        )
+
+
+def try_fused_ce(ignore_index=-100, label_smoothing=0.0, use_liger=False):
+    """
+    Return an instantiated fused linear+CE loss, trying Liger then cut-cross-entropy.
+
+    Both avoid materializing the [B*S, vocab_size] logits tensor.
+    Call signature: loss = fused_ce(hidden [B*S, D], lm_head_weight [vocab, D], labels [B*S])
+
+    use_liger: whether to attempt the Liger backend (Linux/Triton only).
+    Returns (instance, backend_name) or (None, None) if neither is available.
+    """
+    if use_liger and _LIGER_SUPPORTED:
+        cls = try_liger_fused_ce()
+        if cls is not None:
+            return (
+                cls(ignore_index=ignore_index, label_smoothing=label_smoothing),
+                "liger",
+            )
+
+    # CCE does not support label_smoothing — fall back to standard CE so smoothing is honoured.
+    if label_smoothing > 0:
+        return None, None
+
+    try:
+        from cut_cross_entropy import linear_cross_entropy  # noqa: F401
+
+        return (
+            _CCEFusedCELoss(ignore_index=ignore_index, label_smoothing=0.0),
+            "cce",
+        )
+    except ImportError:
+        return None, None
 
 
 def audit_kernel_patches(

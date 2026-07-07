@@ -1,14 +1,18 @@
-import json
 import random
 import time
 
 import torch
 from datasets import load_dataset
 
-from src.tinyllm.benchmarks.base import BaseBenchmark
+from src.tinyllm.benchmarks.base import BaseBenchmark, score_completions
 
 
 class HellaSwagBenchmark(BaseBenchmark):
+    """
+    4-way completion scoring benchmark for commonsense NLI.
+    Correct answer index is stored in item["label"] (string "0"-"3").
+    """
+
     def __init__(self, num_samples: int = 200, seed: int = 42):
         self.num_samples = num_samples
         self.seed = seed
@@ -29,7 +33,6 @@ class HellaSwagBenchmark(BaseBenchmark):
     @torch.no_grad()
     def run(self, model, tokenizer, device):
         t0 = time.perf_counter()
-        model.eval()
         data = self._load_data()
 
         correct = 0
@@ -38,27 +41,14 @@ class HellaSwagBenchmark(BaseBenchmark):
         for item in data:
             ctx = item["ctx"]
             endings = item["endings"]
+            label = int(item["label"])
 
-            ctx_ids = tokenizer.encode(ctx, return_tensors="pt").to(device)
-            ctx_len = ctx_ids.shape[1]
+            completions = [" " + e for e in endings]
+            scores = score_completions(
+                model, tokenizer, device, ctx, completions
+            )
 
-            scores = []
-            for ending in endings:
-                text = ctx + " " + ending
-                input_ids = tokenizer.encode(text, return_tensors="pt").to(
-                    device
-                )
-                logits = model(input_ids)
-                shift_logits = logits[:, ctx_len - 1 : -1, :]
-                shift_labels = input_ids[:, ctx_len:]
-                loss = torch.nn.functional.cross_entropy(
-                    shift_logits.reshape(-1, shift_logits.shape[-1]),
-                    shift_labels.reshape(-1),
-                    reduction="mean",
-                )
-                scores.append(-loss.item())
-
-            if scores.index(max(scores)) == 0:
+            if scores.index(max(scores)) == label:
                 correct += 1
             total += 1
 

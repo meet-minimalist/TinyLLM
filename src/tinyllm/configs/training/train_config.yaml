@@ -64,7 +64,26 @@ kernels:
   use_flash_attn: true   # tier 1: flash_attn_varlen_func | tier 2: flex_attention | tier 3: SDPA
 
 benchmarks:
+  # All benchmarks use log-likelihood scoring (no generation required).
+  # Run intervals are staggered: lambada runs 2× as often since it's the
+  # most direct LM quality signal and is the fastest (1 forward per example).
+  lambada:
+    enabled: true
+    num_samples: 500        # ~5K test examples total; 500 gives stable estimates
+    every_n_steps: 5000     # 1 forward/example → fast; run often for smooth curve
   hellaswag:
     enabled: true
-    num_samples: 200
-    every_n_steps: 10000   # ~100 benchmark evals over 1M steps
+    num_samples: 200        # 4-way, 4 forwards/example
+    every_n_steps: 10000
+  winogrande:
+    enabled: true
+    num_samples: 300        # 2-way, 2 forwards/example
+    every_n_steps: 10000
+  arc_easy:
+    enabled: true
+    num_samples: 200        # 4-way, 4 forwards/example
+    every_n_steps: 10000
+  piqa:
+    enabled: true
+    num_samples: 300        # 2-way, 2 forwards/example
+    every_n_steps: 10000

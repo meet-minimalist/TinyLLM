@@ -6,3 +6,10 @@
 5. tqdm instead of print. Also at every 10 th step. Because .item is expensive.
 6. Integrate flash attention
 7. Integrate other triton kernels if possible.
+
+todo
+- add bf16 and fp8 training knobs
+- add liger kernel support
+- add cut cross entropy or fused cross entropy fix
+- fix evals
+- 

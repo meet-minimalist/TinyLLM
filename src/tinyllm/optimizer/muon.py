@@ -122,6 +122,7 @@ def build_muon_adamw_optimizer(
     weight_decay=0.1,
     momentum=0.95,
     adamw_betas=(0.9, 0.95),
+    use_8bit=False,
 ):
     param_groups = split_muon_adamw_params(
         model, muon_lr, adamw_lr, weight_decay, momentum
@@ -136,13 +137,38 @@ def build_muon_adamw_optimizer(
         weight_decay=muon_group.get("weight_decay", 0.0),
     )
 
-    adamw_opt = torch.optim.AdamW(
-        adamw_group["params"],
-        lr=adamw_group["lr"],
-        betas=adamw_betas,
-        weight_decay=adamw_group["weight_decay"],
-        fused=True,
-    )
+    if use_8bit:
+        try:
+            import bitsandbytes as bnb
+
+            adamw_opt = bnb.optim.AdamW8bit(
+                adamw_group["params"],
+                lr=adamw_group["lr"],
+                betas=adamw_betas,
+                weight_decay=adamw_group["weight_decay"],
+            )
+        except ImportError:
+            from src.tinyllm.logger.logger_utils import logger
+
+            logger.warning(
+                "bitsandbytes not installed. Falling back to standard AdamW. "
+                "Install with: pip install bitsandbytes"
+            )
+            adamw_opt = torch.optim.AdamW(
+                adamw_group["params"],
+                lr=adamw_group["lr"],
+                betas=adamw_betas,
+                weight_decay=adamw_group["weight_decay"],
+                fused=True,
+            )
+    else:
+        adamw_opt = torch.optim.AdamW(
+            adamw_group["params"],
+            lr=adamw_group["lr"],
+            betas=adamw_betas,
+            weight_decay=adamw_group["weight_decay"],
+            fused=True,
+        )
 
     return _CombinedOptimizer(muon_opt, adamw_opt)
 

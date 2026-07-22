@@ -1,0 +1,24 @@
+# Multi-Head Latent Attention (DeepSeek-V2 style)
+model_type: "dynamic"
+tokenizer_name: "gpt2"
+
+d_model: 512
+vocab_size: 50304
+max_seq_len: 2048
+embedding: "rope_only"
+
+blocks:
+  count: 8
+  attention: "mla"
+  num_heads: 8
+  norm: "rms"
+  ffn: "gated"
+  ff_multiplier: 4
+  act_fn: "swish"
+  # MLA options
+  q_lora_rank: 256
+  kv_lora_rank: 128
+
+head:
+  norm: "rms"
+  tie_weights: true

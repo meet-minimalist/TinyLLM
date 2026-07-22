@@ -1,0 +1,22 @@
+# Parallel attention + depth-upscaled FFN (PaLM-style)
+model_type: "dynamic"
+tokenizer_name: "gpt2"
+
+d_model: 512
+vocab_size: 50304
+max_seq_len: 2048
+embedding: "rope_only"
+
+blocks:
+  count: 8
+  attention: "mha"
+  ffn: "standard"
+  norm: "layer_norm"
+  num_heads: 8
+  ff_multiplier: 4
+  block_pattern: "parallel"
+  depth_upscale: 2      # 2 parallel FFN branches
+
+head:
+  norm: "layer_norm"
+  tie_weights: true

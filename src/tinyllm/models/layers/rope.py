@@ -2,6 +2,8 @@
 Rotary Positional Embedding (RoPE) implementation.
 """
 
+import math
+
 import torch
 import torch.nn as nn
 
@@ -17,6 +19,8 @@ class RotaryPositionalEmbedding(nn.Module):
         scaling_type: str = None,
         scaling_factor: float = 1.0,
         original_max_seq_len: int = None,
+        beta_fast: float = 32.0,
+        beta_slow: float = 1.0,
     ):
         """
         Initialize RoPE, optionally with YaRN/LongRoPE scaling.
@@ -28,7 +32,12 @@ class RotaryPositionalEmbedding(nn.Module):
             scaling_type: None (no scaling), "yarn" (YaRN), or "longrope".
             scaling_factor: Extension factor. >1 extends context length.
             original_max_seq_len: Original max_seq_len before scaling
-                (used for YaRN ramp). Defaults to max_seq_len / scaling_factor.
+                (used for the YaRN ramp bounds). Defaults to
+                max_seq_len / scaling_factor.
+            beta_fast: YaRN high-frequency boundary (dims with more than this
+                many rotations over the original context are left unscaled).
+            beta_slow: YaRN low-frequency boundary (dims with fewer than this
+                many rotations are fully interpolated).
         """
         super().__init__()
         assert head_dim % 2 == 0, "Head dimension must be even for RoPE"
@@ -37,6 +46,12 @@ class RotaryPositionalEmbedding(nn.Module):
         self.max_seq_len = max_seq_len
         self.scaling_type = scaling_type
         self.scaling_factor = scaling_factor
+        self.beta_fast = beta_fast
+        self.beta_slow = beta_slow
+
+        # Attention temperature scaling (YaRN). 1.0 == no effect, so the
+        # standard and LongRoPE paths leave cos/sin untouched.
+        self.mscale = 1.0
 
         # Original max length before scaling
         self.original_max_seq_len = original_max_seq_len or int(
@@ -57,21 +72,52 @@ class RotaryPositionalEmbedding(nn.Module):
             self.register_buffer("inv_freq", inv_freq, persistent=False)
 
     def _init_yarn(self, base: int):
-        """Initialize YaRN-scaled frequencies with ramp."""
+        """
+        Initialize YaRN-scaled frequencies (Peng et al., 2023, Section 3.2).
+
+        Uses wavelength-based frequency-band bounds derived from beta_fast /
+        beta_slow: high-frequency dims (many rotations over the original
+        context) are extrapolated unchanged, low-frequency dims are fully
+        interpolated by 1/scaling_factor, and a linear ramp blends the band
+        in between. Also computes the attention temperature ``mscale``.
+        """
         dim = self.head_dim // 2
         inv_freq = 1.0 / (
             base ** (torch.arange(0, self.head_dim, 2).float() / self.head_dim)
         )
 
-        # YaRN ramp: lower frequencies keep original, higher frequencies interpolate
-        ramp_ratio = min(1.0, self.original_max_seq_len / self.max_seq_len)
-        ramp = torch.linspace(0, 1, steps=dim)
-        ramp = 1.0 - (1.0 - ramp) / ramp_ratio
-        ramp.clamp_(min=0.0, max=1.0)
+        # Wavelength-based index bounds. A dim's rotation count over the
+        # original context is orig_len * inv_freq / (2*pi); solving for the
+        # index where that equals beta gives these closed-form bounds.
+        def _bound(num_rotations: float) -> float:
+            return (
+                self.head_dim
+                * math.log(
+                    self.original_max_seq_len / (num_rotations * 2 * math.pi)
+                )
+            ) / (2 * math.log(base))
 
-        # Smooth interpolation between standard and scaled
-        inv_freq_scaled = inv_freq / self.scaling_factor
-        inv_freq = (1.0 - ramp) * inv_freq_scaled + ramp * inv_freq
+        low_idx = max(0, math.floor(_bound(self.beta_fast)))
+        high_idx = min(dim - 1, math.ceil(_bound(self.beta_slow)))
+
+        # Non-uniform ramp: 0 below the band (extrapolate), linear across the
+        # band, 1 above it (interpolate).
+        ramp = torch.zeros(dim)
+        if high_idx > low_idx:
+            ramp[low_idx : high_idx + 1] = torch.linspace(
+                0.0, 1.0, steps=(high_idx - low_idx + 1)
+            )
+        ramp[high_idx + 1 :] = 1.0
+
+        # ramp=0 -> keep original inv_freq; ramp=1 -> interpolated (/factor).
+        inv_freq_interpolated = inv_freq / self.scaling_factor
+        inv_freq = (1.0 - ramp) * inv_freq + ramp * inv_freq_interpolated
+
+        # Temperature scaling: t = sqrt(1 + 0.1*ln(s)); applied as a magnitude
+        # scale on cos/sin. mscale = 0.1*ln(s) + 1 matches the paper's
+        # sqrt(1/t) folded into the attention logits.
+        if self.scaling_factor > 1.0:
+            self.mscale = 0.1 * math.log(self.scaling_factor) + 1.0
 
         self.register_buffer("inv_freq", inv_freq, persistent=False)
         self.register_buffer("_yarn_ramp", ramp, persistent=False)
@@ -111,10 +157,11 @@ class RotaryPositionalEmbedding(nn.Module):
         t = torch.arange(seq_len, device=x.device, dtype=self.inv_freq.dtype)
         freqs = torch.outer(t, self.inv_freq)  # [seq_len, head_dim/2]
 
-        # Compute cos and sin
+        # Compute cos and sin, scaled by the YaRN attention temperature
+        # (mscale == 1.0 for standard / LongRoPE, so those are unaffected).
         emb = torch.cat((freqs, freqs), dim=-1)  # [seq_len, head_dim]
-        cos = emb.cos()  # [seq_len, head_dim]
-        sin = emb.sin()  # [seq_len, head_dim]
+        cos = emb.cos() * self.mscale  # [seq_len, head_dim]
+        sin = emb.sin() * self.mscale  # [seq_len, head_dim]
 
         return cos, sin
 

@@ -46,6 +46,9 @@ class DynamicModel(BaseLLM):
                 max_seq_len=max_seq_len,
                 scaling_type=cfg.get("rope_scaling_type"),
                 scaling_factor=cfg.get("rope_scaling_factor", 1.0),
+                original_max_seq_len=cfg.get("rope_original_max_seq_len"),
+                beta_fast=cfg.get("rope_beta_fast", 32.0),
+                beta_slow=cfg.get("rope_beta_slow", 1.0),
             )
         else:
             self.rope = None

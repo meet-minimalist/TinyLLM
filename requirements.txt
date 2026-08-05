@@ -17,6 +17,7 @@ numpy>=1.24.1
 python-box
 python-dotenv
 tabulate>=0.9.0
+torchao>=0.14.0          # fp8 training on H100/Ada (torchao.float8); optional at runtime
 torchinfo>=1.8.0
 tqdm>=4.66.5
 transformers>=4.43.4

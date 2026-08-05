@@ -109,6 +109,11 @@ pip install "triton>=3.7.0"
 echo "Installing liger-kernel..."
 pip install "liger-kernel>=0.8.0"
 
+# 8b. torchao — fp8 training on H100 / Ada (torchao.float8). Optional at runtime;
+# fp8 is a no-op without a Hopper/Ada GPU. Enable via fp8.enabled in train_config.
+echo "Installing torchao..."
+pip install "torchao>=0.14.0"
+
 # 9. Flash Attention
 # PyTorch 2.11 SDPA uses FA2 internally via cuDNN on Ampere — no separate
 # flash-attn package needed. If you have a compatible pre-built wheel, install

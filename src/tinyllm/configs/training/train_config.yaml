@@ -42,6 +42,14 @@ iters_to_accumulate: 4
 precision: "bf16"       # "bf16" (default) | "fp16" | "fp32"
 use_compile: true
 
+# fp8 training (H100 / Ada SM89+). Add-on to the bf16 path: swaps eligible
+# nn.Linear -> Float8Linear (torchao) while keeping fp32 master weights and
+# bf16 autocast. No-op on non-Hopper GPUs / CPU / if torchao is missing.
+fp8:
+  enabled: false          # master switch (requires torchao + SM89+)
+  recipe: "tensorwise"    # tensorwise (default, fastest) | rowwise (safer numerics)
+  filter_fqns: ["lm_head"]  # module-name substrings kept in bf16
+
 log_every: 10
 max_grad_norm: 1.0
 save_every_steps: 10000   # ~100 checkpoints over 1M steps

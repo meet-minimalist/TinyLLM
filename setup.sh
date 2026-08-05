@@ -110,9 +110,9 @@ echo "Installing liger-kernel..."
 pip install "liger-kernel>=0.8.0"
 
 # 9. Flash Attention
-# PyTorch 2.11 SDPA uses FA2 internally via cuDNN on Ampere — no separate
+# PyTorch 2.12 SDPA uses FA2 internally via cuDNN on Ampere — no separate
 # flash-attn package needed. If you have a compatible pre-built wheel, install
 # it here and set use_flash_attn: true in train_config.yaml to use the varlen API.
-# pip install "<wheel-url>"
+pip install flash_attn_3 --find-links https://windreamer.github.io/flash-attention3-wheels/cu132_torch2120
 
 echo "Installation Completed Successfully!"

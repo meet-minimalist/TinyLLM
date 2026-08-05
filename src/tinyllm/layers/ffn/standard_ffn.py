@@ -16,8 +16,11 @@ class StandardFFN(nn.Module):
         **kwargs
     ):
         super().__init__()
-        self.ff1 = nn.Linear(emb_dim, emb_dim * ff_multiplier)
-        self.ff2 = nn.Linear(emb_dim * ff_multiplier, emb_dim)
+        # int() so fractional multipliers yield a valid integer hidden size;
+        # nn.Linear rejects float dimensions.
+        hidden = int(emb_dim * ff_multiplier)
+        self.ff1 = nn.Linear(emb_dim, hidden)
+        self.ff2 = nn.Linear(hidden, emb_dim)
         self.dropout = nn.Dropout(drop_rate)
         self.act = _ACT_DICT.get(act_fn, nn.GELU())
 

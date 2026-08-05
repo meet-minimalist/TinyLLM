@@ -48,9 +48,15 @@ def run_benchmarks(benchmark_config: dict, model, tokenizer, device):
             seed=cfg.get("seed", 42),
         )
 
-        bt0 = time.perf_counter()
-        result = benchmark.run(model, tokenizer, device)
-        elapsed = time.perf_counter() - bt0
+        # A benchmark must never abort training — dataset outages, HF API
+        # changes, etc. are logged and skipped so the run continues.
+        try:
+            bt0 = time.perf_counter()
+            result = benchmark.run(model, tokenizer, device)
+            elapsed = time.perf_counter() - bt0
+        except Exception as e:
+            logger.error(f"Benchmark '{name}' failed and was skipped: {e}")
+            continue
 
         results[name] = result
         acc = result.get("accuracy", float("nan"))

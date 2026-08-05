@@ -28,7 +28,10 @@ class PIQABenchmark(BaseBenchmark):
     def _load_data(self):
         if self._dataset is not None:
             return self._dataset
-        ds = load_dataset("piqa", split="validation", trust_remote_code=True)
+        # The canonical HF "piqa" dataset is script-based and no longer loads on
+        # datasets>=4 ("Dataset scripts are no longer supported"). lighteval/piqa
+        # is a parquet mirror with the same goal/sol1/sol2/label fields.
+        ds = load_dataset("lighteval/piqa", split="validation")
         rng = random.Random(self.seed)
         indices = list(range(len(ds)))
         rng.shuffle(indices)

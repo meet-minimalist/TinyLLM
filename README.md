@@ -228,6 +228,11 @@ kernels:
 - **AdamW**: all 1D / bias / norm / embedding parameters
 - `_CombinedOptimizer` wraps both as a single `torch.optim.Optimizer` (compatible with LR schedulers)
 
+### Chinchilla token budget
+- At startup, logs the Chinchilla-optimal step count (Hoffmann et al. 2022): `D ≈ tokens_per_param × N`, converted to steps via `tokens_per_step` (= `packed_tokens`). This estimates how long to train / when training stops.
+- Set `chinchilla.enabled: true` in the training config to make it drive `num_training_steps` automatically (overriding the manual value); `tokens_per_param: 20` is compute-optimal, `40` ≈ 2× (mild overtraining).
+- Example: a ~50M model at 2048 tokens/step → ~487K steps (20×) or ~975K (40×).
+
 ### Data Pipeline
 - Varlen-packed mode: documents concatenated into fixed-length batches with `cu_seqlens`
 - Fixed-batch mode: traditional `(B, S)` batches

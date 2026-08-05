@@ -41,7 +41,7 @@ warmup_steps: 0.05  # 5% of num_training_steps = 50K steps
 # enabled: true to make it drive num_training_steps (overriding the value above).
 # tokens_per_param: 20 = compute-optimal; 40 ≈ 2× (mild overtraining).
 chinchilla:
-  enabled: false
+  enabled: true
   tokens_per_param: 20
 
 label_smoothing: 0.0    # >0 to enable label smoothing (not compatible with CCE fused CE kernel)

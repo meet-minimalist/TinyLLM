@@ -78,6 +78,15 @@ class Trainer:
 
         self.model.to(self.device)
 
+        # fp8 (H100): swap eligible Linears to Float8Linear BEFORE torch.compile
+        # so the compiler traces the fp8 modules. No-op unless fp8.enabled and
+        # the GPU/torchao support it. bf16 autocast + fp32 master weights stay.
+        from src.tinyllm.utils.fp8_utils import maybe_convert_to_fp8
+
+        self.model, self._fp8_enabled = maybe_convert_to_fp8(
+            self.model, train_config
+        )
+
         use_compile = getattr(train_config, "use_compile", True)
         if use_compile and self.device.type == "cuda":
             # suppress_errors=True: allows graph breaks on ops torch.compile can't

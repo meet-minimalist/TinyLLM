@@ -46,6 +46,10 @@ def run(args):
     assert not (
         train_config.device == "cpu" and precision in ("fp16", "bf16")
     ), f"{precision.upper()} training requires a CUDA device."
+    fp8_cfg = train_config.get("fp8", {}) or {}
+    assert not (
+        train_config.device == "cpu" and fp8_cfg.get("enabled", False)
+    ), "fp8 training requires a CUDA device (Ada SM89+ / Hopper H100)."
 
     device = torch.device(train_config.device)
 

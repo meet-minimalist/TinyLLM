@@ -228,6 +228,25 @@ kernels:
 - **AdamW**: all 1D / bias / norm / embedding parameters
 - `_CombinedOptimizer` wraps both as a single `torch.optim.Optimizer` (compatible with LR schedulers)
 
+### fp8 training (H100 / Ada SM89+)
+Opt-in fp8 matmuls via [torchao float8](https://github.com/pytorch/ao). It is an
+**add-on to the bf16 path**, not a replacement — master weights and the optimizer
+stay fp32, bf16 autocast still wraps everything, and only the big Linear matmuls
+run in fp8. Enable it in the training config:
+
+```yaml
+precision: "bf16"        # keep bf16; fp8 is orthogonal
+fp8:
+  enabled: true          # requires torchao + a Hopper/Ada GPU (SM89+)
+  recipe: "tensorwise"   # tensorwise (fastest) | rowwise (safer numerics)
+  filter_fqns: ["lm_head"]  # kept in bf16 (also any Linear with dims not %16)
+```
+
+Requires `pip install torchao` (in `requirements.txt` / `setup.sh`). It is a safe
+**no-op** on non-Hopper GPUs, CPU, or when torchao is absent — it logs a warning
+and trains in plain bf16. If the fp8 loss curve drifts from your bf16 baseline,
+switch `recipe` to `rowwise`.
+
 ### Data Pipeline
 - Varlen-packed mode: documents concatenated into fixed-length batches with `cu_seqlens`
 - Fixed-batch mode: traditional `(B, S)` batches

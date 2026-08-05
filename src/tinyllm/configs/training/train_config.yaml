@@ -36,6 +36,14 @@ num_training_steps: 1_000_000
 lr_scheduler_type: "cosine"
 warmup_steps: 0.05  # 5% of num_training_steps = 50K steps
 
+# Chinchilla-optimal token budget (Hoffmann et al. 2022): D ≈ tokens_per_param × N.
+# The derived step count is ALWAYS logged at startup as an estimate. Set
+# enabled: true to make it drive num_training_steps (overriding the value above).
+# tokens_per_param: 20 = compute-optimal; 40 ≈ 2× (mild overtraining).
+chinchilla:
+  enabled: true
+  tokens_per_param: 20
+
 label_smoothing: 0.0    # >0 to enable label smoothing (not compatible with CCE fused CE kernel)
 use_grad_accum: true
 iters_to_accumulate: 4

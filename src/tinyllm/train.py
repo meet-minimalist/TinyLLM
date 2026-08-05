@@ -84,6 +84,29 @@ def run(args):
 
     optimizer = optimizer_factory(model, train_config)
 
+    # Chinchilla-optimal token budget: always logged as an estimate; used to set
+    # num_training_steps when chinchilla.enabled is true.
+    from src.tinyllm.utils.chinchilla import (
+        chinchilla_num_steps,
+        tokens_per_step,
+    )
+
+    n_params = sum(p.numel() for p in model.parameters())
+    tps = tokens_per_step(train_config)
+    cc_cfg = train_config.get("chinchilla", {}) or {}
+    tpp = cc_cfg.get("tokens_per_param", 20)
+    cc_steps, cc_tokens = chinchilla_num_steps(n_params, tps, tpp)
+    logger.info(
+        f"Chinchilla estimate: {n_params / 1e6:.2f}M params x {tpp} tok/param "
+        f"= {cc_tokens / 1e9:.2f}B tokens; at {tps:,} tokens/step "
+        f"-> {cc_steps:,} steps to reach the budget."
+    )
+    if cc_cfg.get("enabled", False):
+        train_config["num_training_steps"] = cc_steps
+        logger.info(
+            f"chinchilla.enabled: num_training_steps set to {cc_steps:,}."
+        )
+
     num_warmup_steps = train_config.get("warmup_steps", 0)
     # num_training_steps for the LR scheduler (needs a concrete value)
     num_training_steps = train_config.get("num_training_steps", 0)

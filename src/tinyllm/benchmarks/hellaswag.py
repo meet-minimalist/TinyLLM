@@ -21,9 +21,7 @@ class HellaSwagBenchmark(BaseBenchmark):
     def _load_data(self):
         if self._dataset is not None:
             return self._dataset
-        ds = load_dataset(
-            "Rowan/hellaswag", split="validation", trust_remote_code=True
-        )
+        ds = load_dataset("Rowan/hellaswag", split="validation")
         rng = random.Random(self.seed)
         indices = list(range(len(ds)))
         rng.shuffle(indices)

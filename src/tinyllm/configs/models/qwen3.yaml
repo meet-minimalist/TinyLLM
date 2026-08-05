@@ -1,4 +1,5 @@
-model_type: "dynamic"
+model_type: "dynamic"   # registry dispatch key (do not change)
+name: "qwen3"           # human label — drives logs + experiment folder
 tokenizer_name: "gpt2"
 
 d_model: 256

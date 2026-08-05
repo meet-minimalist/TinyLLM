@@ -16,7 +16,9 @@ class GatedFFN(nn.Module):
         **kwargs
     ):
         super().__init__()
-        hidden = emb_dim * ff_multiplier
+        # int() so fractional multipliers (e.g. SwiGLU's ~2/3*4 = 2.67) yield a
+        # valid integer hidden size; nn.Linear rejects float dimensions.
+        hidden = int(emb_dim * ff_multiplier)
         self.gate = nn.Linear(emb_dim, hidden, bias=False)
         self.up = nn.Linear(emb_dim, hidden, bias=False)
         self.down = nn.Linear(hidden, emb_dim, bias=False)

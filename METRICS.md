@@ -247,6 +247,23 @@ shows what a layer *could* do; activation spectral shows what it *actually does*
 
 ---
 
+## 8. Downstream Benchmarks (`benchmark/`)
+
+Zero-shot log-likelihood evals run *during* training (LAMBADA, HellaSwag, WinoGrande,
+ARC-Easy, PIQA), logged as `benchmark/<name>/accuracy` (plus `benchmark/lambada/perplexity`).
+
+| Metric | What it measures | Healthy | Warning |
+|---|---|---|---|
+| `benchmark/<name>/accuracy` | Fraction of examples where the highest-log-likelihood answer is correct | Trends above the random baseline (25% for 4-way, 50% for 2-way) as training proceeds | Stuck at baseline late in a large-model run |
+| `benchmark/lambada/perplexity` | `exp(mean loss)` on the last-word tokens | Decreasing | Rising or flat |
+
+Values *near* the random baseline early in training are expected — not a bug. Account for
+sampling noise (95% CI ≈ `±1.96·sqrt(p(1-p)/n)`; ~±7% at n=200). Full details — datasets,
+sample counts, scoring method, per-scale expectations, and configuration — are in
+[`src/tinyllm/benchmarks/README.md`](src/tinyllm/benchmarks/README.md).
+
+---
+
 ## Quick Reference: Failure Mode Checklist
 
 | Symptom | Metrics to check | Likely cause |

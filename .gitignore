@@ -6,7 +6,8 @@ __pycache__/
 exp/
 wandb/
 tinyllm_env*/
-gpt_training/
+# all training runs (checkpoints + logs) live here
+experiments/
 data_cache/
 .env
 $PROFILE.txt

@@ -1,0 +1,27 @@
+model_type: "dynamic"   # registry dispatch key (do not change)
+name: "qwen3_50m"       # human label — drives logs + experiment folder
+tokenizer_name: "gpt2"
+
+# ~50M parameters (49.9M): 8 blocks × ~3.0M + 25.8M embedding (tied) ≈ 49.9M total
+# Qwen3-style: GQA + QK-RMSNorm + SwiGLU FFN + RMSNorm + RoPE (tied embeddings).
+# Same dims as gpt_50m.yaml, so the two are a clean architecture A/B at ~50M;
+# the distinguishing Qwen3 feature is use_qk_norm below.
+d_model: 512
+vocab_size: 50304  # nearest multiple of 64 above GPT-2 vocab (50257)
+max_seq_len: 2048
+embedding: "rope_only"
+
+blocks:
+  count: 8
+  attention: "gqa"
+  num_heads: 8
+  num_kv_heads: 2     # 4:1 query-to-KV ratio; cuts KV projection params 4×
+  ffn: "gated"        # SwiGLU: down(swish(gate(x)) * up(x))
+  norm: "rms"         # RMSNorm
+  ff_multiplier: 3.0  # hidden = 1536; set to 3.0 (vs 2.67) to land at ~50M
+  act_fn: "swish"     # SiLU gate (standard SwiGLU)
+  use_qk_norm: true   # Qwen3 signature: RMSNorm on per-head Q and K
+
+head:
+  norm: "rms"
+  tie_weights: true

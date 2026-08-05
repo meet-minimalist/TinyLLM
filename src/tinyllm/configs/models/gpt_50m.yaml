@@ -1,4 +1,5 @@
-model_type: "dynamic"
+model_type: "dynamic"   # registry dispatch key (do not change)
+name: "gpt_50m"         # human label — drives logs + experiment folder
 tokenizer_name: "gpt2"
 
 # ~50M parameters: 8 blocks × ~3.1M + 25.8M embedding (tied) ≈ 50.6M total

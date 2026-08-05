@@ -31,13 +31,15 @@ def run(args):
     train_config = Config.parse(args.config_path)
 
     # Experiment folder derives from the model's `name` (in the model YAML);
-    # `exp_path` in the training config is an optional override.
+    # `exp_path` in the training config is an optional override. All runs live
+    # under a common `output_dir` (default "experiments/", which is gitignored).
     exp_name = (
         train_config.get("exp_path")
         or model_config.get("name")
         or model_config.get("model_type", "experiment")
     )
-    exp_path, log_file = get_exp_path(exp_name)
+    runs_root = train_config.get("output_dir", "experiments")
+    exp_path, log_file = get_exp_path(os.path.join(runs_root, exp_name))
     configure_logging(log_file)
 
     packed = train_config.get("packed_tokens", 8192)

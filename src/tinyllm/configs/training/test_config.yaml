@@ -1,5 +1,4 @@
-model_type: "dynamic"
-exp_path: "test_run"
+exp_path: "test_run"   # explicit override of the model-name-derived folder
 
 mode: "varlen_packed"
 train_file_pattern: "D:/d/DeepLearning/datasets/fineweb10b-pretokenized/fineweb_train_*.bin"

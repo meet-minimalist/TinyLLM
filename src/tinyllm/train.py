@@ -30,7 +30,14 @@ def run(args):
     model_config = Config.parse(args.model_config_path)
     train_config = Config.parse(args.config_path)
 
-    exp_path, log_file = get_exp_path(train_config.exp_path)
+    # Experiment folder derives from the model's `name` (in the model YAML);
+    # `exp_path` in the training config is an optional override.
+    exp_name = (
+        train_config.get("exp_path")
+        or model_config.get("name")
+        or model_config.get("model_type", "experiment")
+    )
+    exp_path, log_file = get_exp_path(exp_name)
     configure_logging(log_file)
 
     packed = train_config.get("packed_tokens", 8192)

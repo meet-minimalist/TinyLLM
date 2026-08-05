@@ -1,5 +1,6 @@
-model_type: "gpt"
-exp_path: "gpt_training"
+# Model identity (model_type + name) lives in the model YAML (-m ...).
+# The experiment folder defaults to that model's `name`; set `exp_path` here
+# only to override it, e.g. exp_path: "lr_sweep_01".
 
 mode: "varlen_packed"
 # Windows paths:

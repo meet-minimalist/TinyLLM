@@ -106,13 +106,26 @@ class Trainer:
             summary(self.model, input_data=[input_ids], verbose=0)
         except Exception:
             pass
-        n_params = sum(p.numel() for p in self.model.parameters())
-        n_trainable = sum(
-            p.numel() for p in self.model.parameters() if p.requires_grad
+        params = list(self.model.parameters())
+        n_params = sum(p.numel() for p in params)
+        n_trainable = sum(p.numel() for p in params if p.requires_grad)
+        # element_size() = bytes per element for the param's dtype (fp32 -> 4).
+        param_bytes = sum(p.numel() * p.element_size() for p in params)
+
+        def _fmt(n: int) -> str:
+            for unit, scale in (("B", 1e9), ("M", 1e6), ("K", 1e3)):
+                if n >= scale:
+                    return f"{n / scale:.2f}{unit}"
+            return str(n)
+
+        model_name = self.model_config.get("name") or self.model_config.get(
+            "model_type", "experiment"
         )
         logger.info(
-            f"Model: {self.train_config.model_type} — "
-            f"{n_params:,} params ({n_trainable:,} trainable)"
+            f"Model: {model_name} — "
+            f"{_fmt(n_params)} params ({n_params:,}), "
+            f"{_fmt(n_trainable)} trainable, "
+            f"{param_bytes / 1024 ** 2:.1f} MB"
         )
 
     def train(self):

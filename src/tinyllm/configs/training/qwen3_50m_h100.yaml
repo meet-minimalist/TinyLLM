@@ -14,12 +14,10 @@
 # only to override it, e.g. exp_path: "lr_sweep_01".
 
 mode: "varlen_packed"
-# Windows paths:
-# train_file_pattern: "D:/d/DeepLearning/datasets/fineweb10b-pretokenized/fineweb_train_*.bin"
-# test_file_pattern: "D:/d/DeepLearning/datasets/fineweb10b-pretokenized/fineweb_val_*.bin"
-# WSL2 paths (uncomment and comment above):
-train_file_pattern: "/mnt/d/d/DeepLearning/datasets/fineweb10b-pretokenized/fineweb_train_*.bin"
-test_file_pattern: "/mnt/d/d/DeepLearning/datasets/fineweb10b-pretokenized/fineweb_val_*.bin"
+# Data lives in ./datasets, populated by setup.sh (10 train shards = ~1B tokens
+# + the val shard). Paths are relative to the repo root where train.py is run.
+train_file_pattern: "./datasets/fineweb_train_*.bin"
+test_file_pattern: "./datasets/fineweb_val_*.bin"
 
 num_workers: 8              # H100 host is Linux; keep the dataloader ahead of the GPU (host-dependent)
 prefetch_factor: 2          # only active when num_workers > 0

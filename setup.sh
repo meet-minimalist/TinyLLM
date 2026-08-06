@@ -115,4 +115,14 @@ pip install "liger-kernel>=0.8.0"
 # it here and set use_flash_attn: true in train_config.yaml to use the varlen API.
 pip install flash_attn_3 --find-links https://windreamer.github.io/flash-attention3-wheels/cu132_torch2120
 
+# 10. FineWeb10B data for the H100 run
+# The 50M qwen3 Chinchilla budget is ~1B tokens; each shard holds 100M tokens,
+# so 10 train shards cover it. Downloads them (plus the val shard) into
+# ./datasets, the path referenced by configs/training/qwen3_50m_h100.yaml.
+DATASET_DIR="./datasets"
+NUM_TRAIN_CHUNKS=10
+echo "Downloading FineWeb10B: ${NUM_TRAIN_CHUNKS} train shards (~1B tokens) + val into ${DATASET_DIR}..."
+mkdir -p "${DATASET_DIR}"
+python -m src.tinyllm.utils.fineweb10b_downloader "${NUM_TRAIN_CHUNKS}" -p "${DATASET_DIR}"
+
 echo "Installation Completed Successfully!"

@@ -9,5 +9,7 @@ tinyllm_env*/
 # all training runs (checkpoints + logs) live here
 experiments/
 data_cache/
+# downloaded FineWeb10B shards (setup.sh populates this)
+datasets/
 .env
 $PROFILE.txt

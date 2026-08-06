@@ -1,0 +1,118 @@
+# H100 preset for the ~50M qwen3 model (pair with -m models/qwen3_50m.yaml).
+#
+#   python -m src.tinyllm.train \
+#       -c src/tinyllm/configs/training/qwen3_50m_h100.yaml \
+#       -m src/tinyllm/configs/models/qwen3_50m.yaml
+#
+# Difference vs train_config.yaml: a large per-step token count (packed_tokens)
+# to feed the H100. This requires per-document RoPE reset so packed_tokens can
+# exceed the model's max_seq_len (2048) — each document is still trained as an
+# independent <=2048 sequence; packing just shares one GPU step across many docs.
+#
+# Model identity (model_type + name) lives in the model YAML (-m ...).
+# The experiment folder defaults to that model's `name`; set `exp_path` here
+# only to override it, e.g. exp_path: "lr_sweep_01".
+
+mode: "varlen_packed"
+# Data lives in ./datasets, populated by setup.sh (10 train shards = ~1B tokens
+# + the val shard). Paths are relative to the repo root where train.py is run.
+train_file_pattern: "./datasets/fineweb_train_*.bin"
+test_file_pattern: "./datasets/fineweb_val_*.bin"
+
+num_workers: 8              # H100 host is Linux; keep the dataloader ahead of the GPU (host-dependent)
+prefetch_factor: 2          # only active when num_workers > 0
+prefetch_queue_size: 2      # thread-based prefetch (Windows only, skipped when num_workers > 0)
+
+# 32768 tokens/step = ~16 sequences of 2048 packed into one step, so the H100
+# runs large matmuls instead of a batch of one. Can be pushed to 65536 if VRAM
+# allows: attention is block-diagonal per document, so cost scales ~linearly
+# with packed_tokens, not quadratically. Requires per-document RoPE reset.
+packed_tokens: 32768
+# max_seq_len is defined by the model config (position-embedding capacity, 2048).
+# The packer caps each document at that length; do NOT set it here.
+# max_seq_len: 2048
+
+device: "cuda:0"
+
+optimizer:
+  type: "muon_adamw"
+  # NOTE: the effective batch grew ~16x vs train_config.yaml (2048 -> 32768
+  # tokens/update). These LRs are inherited unchanged and may warrant scaling
+  # up for the larger batch — tune if loss plateaus or is unstable.
+  muon_lr: 0.0002
+  adamw_lr: 0.001
+  muon_momentum: 0.95
+  weight_decay: 0.1
+  adamw_betas: [0.9, 0.95]
+
+init_lr: 0.001
+num_epochs: 1
+# num_training_steps is overridden by the Chinchilla budget below (enabled).
+# At 32768 tokens/step: 20 x ~50M / 32768 = ~30.5K steps to the compute-optimal
+# budget (~1B tokens). Kept as a fallback if chinchilla is disabled.
+num_training_steps: 1_000_000
+lr_scheduler_type: "cosine"
+warmup_steps: 0.05  # 5% of the resolved num_training_steps
+
+# Chinchilla-optimal token budget (Hoffmann et al. 2022): D ≈ tokens_per_param × N.
+# The derived step count is ALWAYS logged at startup as an estimate. Set
+# enabled: true to make it drive num_training_steps (overriding the value above).
+# tokens_per_param: 20 = compute-optimal; 40 ≈ 2× (mild overtraining).
+chinchilla:
+  enabled: true
+  tokens_per_param: 20
+
+label_smoothing: 0.0    # >0 to enable label smoothing (not compatible with CCE fused CE kernel)
+# Real per-step batch is now large, so no gradient accumulation is needed:
+# one optimizer update per step = packed_tokens (32768) tokens/update.
+use_grad_accum: false
+iters_to_accumulate: 1
+
+precision: "bf16"       # "bf16" (default) | "fp16" | "fp32"
+use_compile: true
+
+log_every: 10
+max_grad_norm: 1.0
+save_every_steps: 2000    # ~15 checkpoints over the ~30K-step run
+use_wandb: true
+resume_wandb_id: null
+
+analysis:
+  every_n_steps: 500     # ~60 analysis snapshots over the ~30K-step run
+  ema_every: 50          # update gradient EMA every N optimizer steps (not every backward)
+  track_weights: true
+  track_gradients: true
+  track_activations: true
+  track_layer_cosim: true
+  spectral: true
+  variance_thresholds: [0.95, 0.99]
+  hist_bins: 64
+
+kernels:
+  use_liger: false     # requires Triton (Linux/WSL only on CUDA 12.4+; not available on Windows)
+  use_flash_attn: true   # tier 1: flash_attn_varlen_func | tier 2: flex_attention | tier 3: SDPA
+
+benchmarks:
+  # All benchmarks use log-likelihood scoring (no generation required).
+  # Intervals rescaled for the shorter (~30K-step) H100 run; lambada runs 2x as
+  # often since it's the most direct LM quality signal and the fastest.
+  lambada:
+    enabled: true
+    num_samples: 500        # ~5K test examples total; 500 gives stable estimates
+    every_n_steps: 1000     # 1 forward/example → fast; run often for smooth curve
+  hellaswag:
+    enabled: true
+    num_samples: 200        # 4-way, 4 forwards/example
+    every_n_steps: 2000
+  winogrande:
+    enabled: true
+    num_samples: 300        # 2-way, 2 forwards/example
+    every_n_steps: 2000
+  arc_easy:
+    enabled: true
+    num_samples: 200        # 4-way, 4 forwards/example
+    every_n_steps: 2000
+  piqa:
+    enabled: true
+    num_samples: 300        # 2-way, 2 forwards/example
+    every_n_steps: 2000

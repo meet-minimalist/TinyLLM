@@ -43,11 +43,19 @@ def run(args):
     configure_logging(log_file)
 
     packed = train_config.get("packed_tokens", 8192)
-    assert model_config.max_seq_len >= packed, (
-        f"model max_seq_len ({model_config.max_seq_len}) must be >= "
-        f"training packed_tokens ({packed}). "
-        f"The position embedding needs at least packed_tokens positions."
-    )
+    # RoPE resets positions per document (see builder._doc_position_ids), so a
+    # packed row may hold many documents and packed_tokens is NOT bounded by
+    # max_seq_len — only each document is (capped by the packer). Absolute
+    # position embeddings (learned / sinusoidal) index positions across the
+    # whole pack, so they still require max_seq_len >= packed_tokens.
+    embedding = model_config.get("embedding", "learned_pe")
+    if embedding != "rope_only":
+        assert model_config.max_seq_len >= packed, (
+            f"model max_seq_len ({model_config.max_seq_len}) must be >= "
+            f"training packed_tokens ({packed}) for '{embedding}' position "
+            f"embeddings, which index absolute positions across the whole "
+            f"packed row. Use embedding: 'rope_only' to pack more tokens/step."
+        )
     # max_seq_len is a property of the model (position-embedding / RoPE capacity),
     # so the model config is its single source of truth. The data pipeline's
     # per-document cap defaults to it; an optional train_config.max_seq_len may

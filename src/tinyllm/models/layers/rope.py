@@ -139,7 +139,10 @@ class RotaryPositionalEmbedding(nn.Module):
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
     def forward(
-        self, x: torch.Tensor, seq_len: int = None
+        self,
+        x: torch.Tensor,
+        seq_len: int = None,
+        position_ids: torch.Tensor = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Compute cosine and sine tensors for RoPE.
@@ -147,6 +150,12 @@ class RotaryPositionalEmbedding(nn.Module):
         Args:
             x: Input tensor of shape [batch, seq_len, num_heads, head_dim].
             seq_len: Sequence length to compute embeddings for. If None, uses x.shape[1].
+            position_ids: Optional [seq_len] tensor of per-token position
+                indices. When None, positions are ``0..seq_len-1`` (contiguous).
+                In varlen packing this is supplied so positions **reset to 0 at
+                each document boundary**, keeping every document's RoPE indices
+                within ``[0, max_seq_len)`` regardless of how many documents are
+                packed into one row.
 
         Returns:
             Tuple of (cos, sin) tensors for applying RoPE.
@@ -154,7 +163,12 @@ class RotaryPositionalEmbedding(nn.Module):
         if seq_len is None:
             seq_len = x.shape[1]
 
-        t = torch.arange(seq_len, device=x.device, dtype=self.inv_freq.dtype)
+        if position_ids is None:
+            t = torch.arange(
+                seq_len, device=x.device, dtype=self.inv_freq.dtype
+            )
+        else:
+            t = position_ids.to(device=x.device, dtype=self.inv_freq.dtype)
         freqs = torch.outer(t, self.inv_freq)  # [seq_len, head_dim/2]
 
         # Compute cos and sin, scaled by the YaRN attention temperature

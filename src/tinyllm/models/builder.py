@@ -8,6 +8,29 @@ from src.tinyllm.models.layers.rope import RotaryPositionalEmbedding
 from src.tinyllm.factory.registry import MODEL_REGISTRY
 
 
+def _doc_position_ids(
+    cu_seqlens: torch.Tensor, seq_len: int, device: torch.device
+) -> torch.Tensor:
+    """Per-document RoPE positions for a varlen-packed row.
+
+    Positions run ``0..len-1`` within each document and reset to 0 at every
+    document boundary in ``cu_seqlens``, so a packed row containing many
+    documents never uses an absolute position larger than the longest
+    document (which the packer caps at ``max_seq_len``). Fully vectorized, and
+    correct even when the packer emits a zero-length trailing document (a
+    duplicated ``cu_seqlens`` value from clamping the +1 target shift).
+    """
+    positions = torch.arange(seq_len, device=device, dtype=torch.long)
+    cu = cu_seqlens.to(device=device, dtype=torch.long)
+    # doc_id[t] = index of the rightmost boundary <= t. searchsorted(right=True)
+    # naturally skips zero-length docs (duplicate boundaries), so each token maps
+    # to the real document that contains it.
+    doc_id = torch.searchsorted(cu, positions, right=True) - 1
+    doc_id = doc_id.clamp_(min=0)
+    start_of_doc = cu[doc_id]  # [seq_len]
+    return positions - start_of_doc
+
+
 def _first_key(cfg, *keys, default=None):
     for k in keys:
         if isinstance(cfg, dict):
@@ -106,7 +129,18 @@ class DynamicModel(BaseLLM):
         x = self.position_embedding(x)
 
         if self.rope is not None:
-            cos, sin = self.rope(x, seq_len=x.shape[1])
+            # In varlen packing, reset RoPE positions at each document boundary
+            # so positions stay within [0, max_seq_len) no matter how many docs
+            # are packed per row. Without cu_seqlens (fixed_batch), fall back to
+            # contiguous 0..S-1 positions.
+            position_ids = (
+                _doc_position_ids(cu_seqlens, x.shape[1], x.device)
+                if cu_seqlens is not None
+                else None
+            )
+            cos, sin = self.rope(
+                x, seq_len=x.shape[1], position_ids=position_ids
+            )
         else:
             cos, sin = None, None
 

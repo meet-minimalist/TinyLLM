@@ -16,7 +16,10 @@ prefetch_factor: 2          # only active when num_workers > 0
 prefetch_queue_size: 2      # thread-based prefetch (Windows only, skipped when num_workers > 0)
 
 packed_tokens: 2048  # 2048 tokens/step × 4 grad accum = 8192 tokens/optimizer update
-max_seq_len: 2048
+# max_seq_len is defined by the model config (position-embedding capacity).
+# Uncomment ONLY to train on shorter documents than the model supports
+# (value must be <= the model's max_seq_len).
+# max_seq_len: 2048
 
 device: "cuda:0"
 

@@ -98,7 +98,7 @@ class Trainer:
     def _log_model_summary(self):
         input_ids = torch.zeros(
             1,
-            self.train_config.max_seq_len,
+            self.model_config.max_seq_len,
             dtype=torch.int32,
             device=self.device,
         )

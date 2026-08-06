@@ -48,9 +48,18 @@ def run(args):
         f"training packed_tokens ({packed}). "
         f"The position embedding needs at least packed_tokens positions."
     )
-    assert (
-        model_config.max_seq_len == train_config.max_seq_len
-    ), f"model max_seq_len ({model_config.max_seq_len}) must equal train_config max_seq_len ({train_config.max_seq_len})"
+    # max_seq_len is a property of the model (position-embedding / RoPE capacity),
+    # so the model config is its single source of truth. The data pipeline's
+    # per-document cap defaults to it; an optional train_config.max_seq_len may
+    # only *lower* it (to train on shorter documents than the model supports).
+    data_max_seq_len = (
+        train_config.get("max_seq_len") or model_config.max_seq_len
+    )
+    assert data_max_seq_len <= model_config.max_seq_len, (
+        f"train_config max_seq_len ({data_max_seq_len}) must be <= model "
+        f"max_seq_len ({model_config.max_seq_len})."
+    )
+    train_config["max_seq_len"] = data_max_seq_len  # resolve for downstream
     precision = getattr(train_config, "precision", "bf16")
     assert not (
         train_config.device == "cpu" and precision in ("fp16", "bf16")

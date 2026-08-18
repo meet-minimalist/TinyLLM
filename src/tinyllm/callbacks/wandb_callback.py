@@ -1,3 +1,5 @@
+import os
+
 from src.tinyllm.callbacks.base_callback import BaseCallback
 
 
@@ -24,6 +26,8 @@ class WandbCallback(BaseCallback):
             config_dict.update(model_config.to_dict())
 
         resume_id = getattr(train_config, "resume_wandb_id", None)
+        if resume_id is None:
+            resume_id = os.environ.get("WANDB_RUN_ID")
         self.wandb.init(
             project="TinyLLM",
             config=config_dict,

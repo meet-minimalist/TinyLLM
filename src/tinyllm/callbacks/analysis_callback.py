@@ -44,29 +44,53 @@ class GradientCapture:
             if do_ema:
                 beta = self.ema_beta
                 if name not in self._ema:
+                    # Both moments start at zero and are bias-corrected below,
+                    # as Adam does. Seeding var at 1.0 instead made the SNR
+                    # unreadable: real gradient variance is ~1e-6, and at
+                    # beta=0.99 with an update only every ema_every steps that
+                    # seed needs ~69K steps to decay, so the reported SNR was
+                    # dominated by the initial value for entire runs.
                     self._ema[name] = {
                         "mean": torch.zeros_like(g),
-                        "var": torch.ones_like(g),
+                        "var": torch.zeros_like(g),
+                        "t": 0,
                     }
                 ema = self._ema[name]
                 new_mean = beta * ema["mean"] + (1 - beta) * g
                 new_var = beta * ema["var"] + (1 - beta) * (g - new_mean).pow(2)
-                self._ema[name] = {"mean": new_mean, "var": new_var}
+                self._ema[name] = {
+                    "mean": new_mean,
+                    "var": new_var,
+                    "t": ema["t"] + 1,
+                }
 
             if do_full:
                 import numpy as np
 
                 ema = self._ema.get(name)
-                snr = (
-                    (ema["mean"].abs() / (ema["var"].sqrt() + 1e-8))
-                    .mean()
-                    .item()
-                    if ema is not None
-                    else 0.0
-                )
+                if ema is not None and ema["t"] > 0:
+                    bias_correction = 1.0 - self.ema_beta ** ema["t"]
+                    mean_hat = ema["mean"] / bias_correction
+                    var_hat = ema["var"] / bias_correction
+                    snr = (
+                        (mean_hat.abs() / (var_hat.sqrt() + 1e-8)).mean().item()
+                    )
+                else:
+                    snr = 0.0
+                # This hook runs inside backward, before the trainer can check
+                # the gradient, so a NaN reaches np.histogram first and raises
+                # "autodetected range of [nan, nan] is not finite" — killing the
+                # run instead of letting the trainer skip the batch. Bin only
+                # the finite values and let the trainer make that decision.
+                g_np = g.cpu().numpy()
+                finite = g_np[np.isfinite(g_np)]
                 self.stats[name] = {
                     "norm": g.norm().item(),
-                    "_hist": np.histogram(g.cpu().numpy(), bins=self.num_bins),
+                    "_hist": (
+                        np.histogram(finite, bins=self.num_bins)
+                        if finite.size
+                        else None
+                    ),
                     "snr": snr,
                 }
 

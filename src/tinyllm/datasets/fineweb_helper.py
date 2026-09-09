@@ -225,15 +225,23 @@ class NanoGPTDataset(IterableDataset):
                 inputs = buf[:-1]
                 targets = buf[1:]
 
-                # Build cu_seqlens (reflects buf length = packed_tokens+1)
+                # Build cu_seqlens (reflects buf length = packed_tokens+1).
+                # Clamp to input length (inputs = buf[:-1], removing the +1
+                # shift token). That clamp pulls the final boundary down by
+                # one, so a last segment of length 1 collapses to length 0 and
+                # leaves a duplicated boundary (~1 batch in 500).
+                # flash_attn_varlen_func treats a zero-length segment as
+                # undefined behaviour, so drop duplicates here — before the
+                # tensor is built, to keep it pinned in one allocation.
+                max_len = inputs.shape[0]
                 cum_len = [0]
                 for s, e in zip(starts, ends):
-                    cum_len.append(cum_len[-1] + (e - s))
+                    boundary = min(cum_len[-1] + (e - s), max_len)
+                    if boundary != cum_len[-1]:
+                        cum_len.append(boundary)
                 cu_seqlens = torch.tensor(
                     cum_len, dtype=torch.int32, pin_memory=True
                 )
-                # Clamp to input length (inputs = buf[:-1], removing the +1 shift token)
-                cu_seqlens = cu_seqlens.clamp(max=inputs.shape[0])
 
                 # Add batch dim for model compatibility
                 inputs = inputs.unsqueeze(0)

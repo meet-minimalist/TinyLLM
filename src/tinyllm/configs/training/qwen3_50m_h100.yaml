@@ -36,10 +36,13 @@ device: "cuda:0"
 
 optimizer:
   type: "muon_adamw"
-  # NOTE: the effective batch grew ~16x vs train_config.yaml (2048 -> 32768
-  # tokens/update). These LRs are inherited unchanged and may warrant scaling
-  # up for the larger batch — tune if loss plateaus or is unstable.
-  muon_lr: 0.0002
+  # Muon orthogonalizes the gradient (singular values ~1), so muon_lr IS the
+  # weight-space step size — it does not scale with gradient magnitude the way
+  # an AdamW LR does. The standard band is 0.02-0.05. The previous 0.0002 moved
+  # a 512x512 matrix ~0.04%/step, so after 20K steps every 2D weight was still
+  # at its random init (all spectral metrics flat, alpha > 10 on 53/56 layers).
+  # adamw_lr governs embeddings, the tied head, and the 1D norm gains.
+  muon_lr: 0.02
   adamw_lr: 0.001
   muon_momentum: 0.95
   weight_decay: 0.1

@@ -133,11 +133,15 @@ class GQA(nn.Module):
             .transpose(1, 2)
         )
 
-        if cos is not None and sin is not None:
-            q, k = apply_rotary_pos_emb(q, k, cos, sin)
+        # QK-norm must run BEFORE RoPE, as in Qwen3. The two orders are not
+        # equivalent: RoPE preserves each head vector's norm, but the norm's
+        # learnable per-channel weight multiplies the channels, and RoPE has
+        # already mixed them by then.
         if self.q_norm is not None:
             q = self.q_norm(q)
             k = self.k_norm(k)
+        if cos is not None and sin is not None:
+            q, k = apply_rotary_pos_emb(q, k, cos, sin)
 
         B, H, S, D = q.shape
 

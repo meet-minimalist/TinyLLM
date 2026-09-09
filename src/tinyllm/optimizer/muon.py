@@ -78,6 +78,11 @@ class Muon(torch.optim.Optimizer):
 
                 if g.ndim >= 2:
                     g = _zeroth_power_via_newtonschulz(g, steps=ns_steps)
+                    # Newton-Schulz returns singular values ~1 regardless of
+                    # shape, so a wide matrix would otherwise take the same
+                    # step as a tall one. Scale by the aspect ratio to keep the
+                    # per-row update size consistent across shapes.
+                    g = g * max(1.0, g.size(-2) / g.size(-1)) ** 0.5
 
                 p.add_(g, alpha=-lr)
 
@@ -92,6 +97,11 @@ def split_muon_adamw_params(
 
     Muon: 2D weight matrices (nn.Linear weights, no bias)
     AdamW: everything else (1D params, biases, embeddings, normalization weights)
+
+    Embeddings and the LM head are excluded from Muon deliberately: their rows
+    are per-token vectors rather than a transform between two feature spaces,
+    so orthogonalizing their gradient is not meaningful. With tied weights the
+    embedding tensor is also the classifier, which makes this doubly important.
     """
     muon_params = []
     adamw_params = []
@@ -99,7 +109,8 @@ def split_muon_adamw_params(
     for name, p in model.named_parameters():
         if not p.requires_grad:
             continue
-        if p.ndim >= 2:
+        is_embed_or_head = "embedding" in name or "lm_head" in name
+        if p.ndim >= 2 and not is_embed_or_head:
             muon_params.append(p)
         else:
             adamw_params.append(p)

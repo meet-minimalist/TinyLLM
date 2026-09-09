@@ -6,6 +6,16 @@ from src.tinyllm.logger.logger_utils import logger
 from src.tinyllm.loss_fn.loss_helper import compute_ce_loss
 from src.tinyllm.utils.train_utils import get_autocast_ctx
 
+# The packer never pads — every position in a batch is a real token — so no
+# label should be masked out. pad_token_id must NOT be used here: the GPT-2
+# tokenizer has no pad token, so get_tokenizer aliases it to eos (50256), which
+# is the document separator in the FineWeb data. Using it would silently drop
+# every end-of-document target from the loss.
+IGNORE_INDEX = -100
+
+# Consecutive non-finite steps tolerated before the run is aborted.
+MAX_CONSECUTIVE_NONFINITE = 20
+
 
 class Trainer:
     def __init__(
@@ -57,7 +67,7 @@ class Trainer:
             else getattr(train_config, "kernels", {})
         ) or {}
         self._fused_ce, _backend = try_fused_ce(
-            ignore_index=tokenizer.pad_token_id,
+            ignore_index=IGNORE_INDEX,
             label_smoothing=label_smoothing,
             use_liger=kernels_cfg.get("use_liger", False),
         )
@@ -75,6 +85,7 @@ class Trainer:
 
         self.global_step = 0
         self.global_tokens = 0
+        self._consecutive_nonfinite = 0
 
         self.model.to(self.device)
 
@@ -237,9 +248,18 @@ class Trainer:
                     logits,
                     targets,
                     self.train_config.get("label_smoothing", 0.0),
-                    self.tokenizer.pad_token_id,
+                    IGNORE_INDEX,
                 )
             loss = loss / self.iters_to_accumulate
+
+        # A non-finite loss poisons every parameter the moment optimizer.step()
+        # runs, and it is unrecoverable: clip_grad_norm_ does not filter NaN
+        # (error_if_nonfinite defaults to False), so the corruption spreads
+        # silently and every later step trains on garbage. Skip the batch.
+        if not torch.isfinite(loss):
+            self._report_nonfinite("loss", loss, inputs, cu_seqlens, batch_idx)
+            self.optimizer.zero_grad(set_to_none=True)
+            return
 
         if self.scaler is not None:
             self.scaler.scale(loss).backward()
@@ -255,9 +275,19 @@ class Trainer:
             if self.scaler is not None:
                 self.scaler.unscale_(self.optimizer)
             if self.max_grad_norm is not None:
-                torch.nn.utils.clip_grad_norm_(
+                grad_norm = torch.nn.utils.clip_grad_norm_(
                     self.model.parameters(), self.max_grad_norm
                 )
+                # The loss can be finite while the backward pass still produces
+                # NaN/Inf grads, so check the norm clip_grad_norm_ already
+                # computed rather than paying for a second pass.
+                if not torch.isfinite(grad_norm):
+                    self._report_nonfinite(
+                        "grad_norm", grad_norm, inputs, cu_seqlens, batch_idx
+                    )
+                    self.optimizer.zero_grad(set_to_none=True)
+                    return
+            self._consecutive_nonfinite = 0
             if self.scaler is not None:
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
@@ -300,6 +330,45 @@ class Trainer:
                 device=self.device,
             )
 
+    def _report_nonfinite(self, what, value, inputs, cu_seqlens, batch_idx):
+        """Log everything needed to identify the offending batch, then decide
+        whether to keep going. Skipping is only safe for isolated batches — a
+        run that cannot produce a finite loss is burning GPU time, so abort
+        once the failures become consecutive."""
+        self._consecutive_nonfinite += 1
+
+        details = [
+            f"step={self.global_step}",
+            f"batch_idx={batch_idx}",
+            f"{what}={value.item()}",
+            f"inputs={tuple(inputs.shape)}",
+            f"token_id_range=[{inputs.min().item()}, {inputs.max().item()}]",
+        ]
+        if cu_seqlens is not None:
+            seg_lens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+            zero_at = [i for i, L in enumerate(seg_lens) if L == 0]
+            details += [
+                f"num_segments={len(seg_lens)}",
+                f"segment_len_min={min(seg_lens)}",
+                f"segment_len_max={max(seg_lens)}",
+                f"zero_length_segments={len(zero_at)}",
+            ]
+            if zero_at:
+                details.append(f"zero_length_at={zero_at[:16]}")
+
+        logger.error(
+            f"Non-finite {what} — skipping batch "
+            f"({self._consecutive_nonfinite}/{MAX_CONSECUTIVE_NONFINITE} "
+            f"consecutive). " + ", ".join(details)
+        )
+
+        if self._consecutive_nonfinite >= MAX_CONSECUTIVE_NONFINITE:
+            raise RuntimeError(
+                f"{self._consecutive_nonfinite} consecutive non-finite steps "
+                f"at step {self.global_step}. The model is very likely already "
+                f"corrupted; stopping instead of training on garbage."
+            )
+
     def _step_lr(self):
         if hasattr(self.lr_scheduler, "step"):
             self.lr_scheduler.step()
@@ -319,10 +388,12 @@ class Trainer:
                     cu_seqlens = None
                 inputs = inputs.to(self.device, non_blocking=True)
                 targets = targets.to(self.device, non_blocking=True)
+                if cu_seqlens is not None:
+                    # flash_attn_varlen_func requires this on the same device;
+                    # the training path already moves it.
+                    cu_seqlens = cu_seqlens.to(self.device, non_blocking=True)
                 logits = self.model(inputs, cu_seqlens=cu_seqlens)
-                loss = compute_ce_loss(
-                    logits, targets, 0.0, self.tokenizer.pad_token_id
-                )
+                loss = compute_ce_loss(logits, targets, 0.0, IGNORE_INDEX)
                 total_loss += loss.item()
                 n_steps += 1
 

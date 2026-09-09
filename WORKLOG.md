@@ -4,6 +4,45 @@ A running log of the work to train a tiny LLM from scratch. Newest entry first.
 
 ---
 
+## 2026-09-09 (later) — The LR fix worked, and the packer was throwing away 17% of the corpus
+
+Ran the full epoch with `muon_lr: 0.02` (W&B run `hxjleaq0`). It works. Loss reached **3.589,
+perplexity 36.2**, against 5.94 / PPL 380 on the old run. The non-finite guard never fired and there
+was no NaN anywhere in the log.
+
+But the run stopped at step 25345 of 30446 and went straight to evals. It did not stop early — the
+dataloader ran out of data.
+
+`setup.sh` downloads 10 shards at 100M tokens each, so 1.0B tokens were on disk. The run consumed
+25345 x 32768 = 830.5M, which is 83.1%. The missing 17% was being discarded by the packer.
+
+The cause was one line in `_iter_varlen`. `end` is clamped by three things — the next document,
+`max_seq_len`, and the space left in the batch — and then `idx += 1` moved to the next document
+unconditionally. So whenever either of the last two clamps bound, the rest of that document was
+skipped and never read again. A 6,000-token document contributed 2,048 tokens and lost 3,952. The
+last document of every batch lost its tail too.
+
+Simulating the old loop against realistic FineWeb document lengths predicted 20-25% loss. The run
+lost 16.9%, and the 2048 cap accounted for roughly six-sevenths of it.
+
+The knock-on effect mattered more than the lost data. `num_training_steps` is Chinchilla-derived at
+30446, so the cosine schedule was built for 30446 steps but ended at 25345. **The LR never finished
+decaying** — the last step logged `LR: 0.001496`, not ~0. The model never got the end-of-cosine
+anneal, so 3.589 is not the number this run would have produced with a completed schedule.
+
+**Fix:** track an offset into the current document and only advance to the next one when the current
+document is fully consumed. A long document now spans several segments, and one that does not fit
+the current batch resumes in the next. Verified on a synthetic 3M-token shard: token use went from
+80.2% to **100.0%**, with no duplicated tokens, no zero-length segments, and no segment over
+`max_seq_len`. Batch count rose 24%.
+
+**Open risk:** this leaves only about 74 steps of margin (0.24%) between what the data yields
+(~30,520 steps) and what the schedule wants (30,446). If the real shards come in slightly under 100M
+tokens, the run falls short again and the cosine still will not complete. One extra shard
+(`NUM_TRAIN_CHUNKS=11`) would buy ~10% headroom.
+
+---
+
 ## 2026-09-09 — Post-mortem: the qwen3_50m H100 run
 
 Base commit: `0deefe6` on `main`. Run: `qwen3_50m` on one H100, W&B run `4pepd8cg`. It died at

@@ -189,13 +189,17 @@ class NanoGPTDataset(IterableDataset):
             n = len(bos_idx)
             total = shard["num_tokens"]
             target_len = self.cfg.packed_tokens + 1  # +1 for input/target shift
+            # Offset to resume a partly-consumed document from. None means the
+            # next document starts at its own BOS. This carries across batches,
+            # so a document longer than one batch spans several of them.
+            doc_pos = None
 
             while idx < n:
                 starts, ends = [], []
                 cur_len = 0
 
-                while cur_len < target_len:
-                    start = bos_idx[idx]
+                while cur_len < target_len and idx < n:
+                    start = bos_idx[idx] if doc_pos is None else doc_pos
                     next_bos = bos_idx[idx + 1] if idx + 1 < n else total
 
                     # Clamp by: next doc, max_seq_len, or remaining batch space
@@ -207,9 +211,17 @@ class NanoGPTDataset(IterableDataset):
                     starts.append(start)
                     ends.append(end)
                     cur_len += end - start
-                    idx += 1
-                    if idx >= n and cur_len < target_len:
-                        break  # shard exhausted
+
+                    # Only move to the next document once this one is fully
+                    # consumed. Advancing unconditionally discarded whatever
+                    # the two length clamps cut off, which threw away ~17% of
+                    # the corpus — every document longer than max_seq_len lost
+                    # its tail, and so did the last document of every batch.
+                    if end >= next_bos:
+                        idx += 1
+                        doc_pos = None
+                    else:
+                        doc_pos = end
 
                 if cur_len < 2:
                     continue  # need at least input+target

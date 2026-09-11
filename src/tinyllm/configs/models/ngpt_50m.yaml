@@ -1,0 +1,40 @@
+model_type: "dynamic"   # registry dispatch key (do not change)
+name: "ngpt_50m"        # human label — drives logs + experiment folder
+tokenizer_name: "gpt2"
+
+# nGPT (arXiv:2410.01131): the normalized Transformer.
+#
+# Identical dims to qwen3_50m.yaml so the two are a clean A/B at ~50M. The only
+# architectural differences come from `ngpt: true` below:
+#   - every hidden state is L2-normalized to the unit hypersphere
+#   - the residual add becomes a learned interpolation toward the block output
+#   - all norm layers are removed, including the final one
+#   - weight matrices are re-normalized after every optimizer step
+#   - learnable scales (s_qk, s_u, s_v, s_z) restore dynamic range where the
+#     unit-norm constraint would otherwise crush it
+ngpt: true
+
+# Eigen learning rate init. The paper uses 0.05 and suggests the order of
+# 1/n_layers; with 8 blocks that would be 0.125. Worth sweeping — it controls
+# how far each block is allowed to move the hidden state per step.
+ngpt_alpha_init: 0.05
+
+d_model: 512
+vocab_size: 50304  # nearest multiple of 64 above GPT-2 vocab (50257)
+max_seq_len: 2048
+embedding: "rope_only"
+
+blocks:
+  count: 8
+  attention: "gqa"
+  num_heads: 8
+  num_kv_heads: 2     # 4:1 query-to-KV ratio; cuts KV projection params 4×
+  ffn: "gated"        # SwiGLU: down(swish(gate(x)) * up(x))
+  norm: "rms"         # unused under ngpt — no norm layers are created
+  ff_multiplier: 3.0  # hidden = 1536; matches qwen3_50m for a fair comparison
+  act_fn: "swish"     # SiLU gate (standard SwiGLU)
+  use_qk_norm: false  # nGPT replaces QK-RMSNorm with L2 norm + learned s_qk
+
+head:
+  norm: "rms"         # unused under ngpt — final_norm becomes Identity
+  tie_weights: true   # NOTE: the paper uses untied input/output embeddings

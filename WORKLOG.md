@@ -4,6 +4,69 @@ A running log of the work to train a tiny LLM from scratch. Newest entry first.
 
 ---
 
+## 2026-09-11 — Implemented nGPT (branch `exp/nGPT`, not for merge)
+
+Implemented the normalized Transformer from arXiv:2410.01131 as an experiment branch, to A/B against
+the qwen3_50m baseline that just finished at loss 3.589 / PPL 36.2.
+
+The idea in one line: constrain every meaningful vector — token embeddings, the rows of every weight
+matrix, and the hidden state between blocks — to unit L2 norm, so the hidden state never leaves the
+surface of a 512-dimensional unit hypersphere.
+
+Four things follow from that constraint:
+
+1. **The residual add has to go.** Adding two unit vectors gives you something off the sphere, so the
+   residual stream becomes `h <- Norm(h + alpha * (Norm(f(h)) - h))` — a linear interpolation toward
+   the block output, then a projection back onto the sphere. `alpha` is a learned vector of size
+   d_model, one step size per channel, which the paper calls the eigen learning rate.
+2. **Normalization layers become redundant.** With a unit-norm input and unit-norm weight rows there
+   is nothing for RMSNorm to correct, so every norm layer is removed, including the final one.
+   `final_norm` becomes `nn.Identity`.
+3. **The constraint is enforced after the optimizer, not in the forward pass.** The optimizer takes
+   an unconstrained step and `normalize_weights()` retracts the result back onto the sphere.
+4. **Every dot product is now between unit vectors**, so magnitudes collapse to ~1/sqrt(d_model).
+   Four learned scaling factors put the dynamic range back where it matters: `s_qk` on q/k, `s_u`
+   and `s_v` in the MLP (with an extra sqrt(d_model) on the gate so SiLU is not stuck in its linear
+   region), and `s_z` on the logits. The softmax scale flips from 1/sqrt(d_k) to sqrt(d_k), since
+   normalized q.k already lands in [-1, 1].
+
+All learnable scales use the paper's init/scale trick: store the parameter at `scale`, multiply by
+`init/scale` in the forward pass. Since an Adam step moves the stored value by roughly the learning
+rate, the effective value moves by `lr * (init/scale)` — that ratio decouples how fast these scalars
+move from the global LR used for the matrices.
+
+**Bug worth recording.** My first version of `normalize_linear_` inferred the embedding axis from the
+weight shape. With d_model=512 and 8 heads, both `q_proj` and `o_proj` are 512x512, but `q_proj` is
+an input projection (embedding axis = dim 1) and `o_proj` is an output projection (dim 0). The
+heuristic picked dim 0 for both, so q_proj rows came out at 0.91-1.09 instead of 1.0. The failure is
+silent — the hidden state still lands on the sphere because the block re-normalizes it — so the only
+symptom would have been a model that quietly trains worse. Each module now passes its own dim.
+
+**Verified locally:** all weight matrices unit-norm at init and after training steps (worst
+deviation 3.6e-7); hidden state exactly 1.000000 after every block; the retraction restores the
+sphere after an optimizer step; all five scale types start at their intended effective value and
+move under training; and the `ngpt: false` path is untouched (scales are None, softmax scale
+unchanged, `normalize_weights()` a no-op, explicit SDPA scale identical to PyTorch's default).
+
+**What the local micro-test does not tell us.** On a memorize-a-random-batch task the baseline
+reaches 0.009 and nGPT plateaus at ~2.7. That is expected rather than damning: nGPT physically
+cannot blow up weight magnitudes to memorize, because every row is pinned to unit norm. Sweeping
+`alpha_init` across 0.05-0.5 moves that plateau only 2.77 -> 2.66, so the ceiling is the constraint,
+not the step size. Memorizing random tokens is the one task where a norm-constrained model looks
+worst. The real comparison needs the H100 run.
+
+**Open questions for the run:**
+- `alpha_init` is 0.05 (the paper's value). The paper also says "order of 1/n_layers", which for 8
+  blocks is 0.125. Worth a sweep.
+- Weights are tied (`tie_weights: true`) to match the baseline; the paper uses untied input/output
+  embeddings.
+- The preset keeps Muon+AdamW rather than the paper's plain Adam, to hold the optimizer fixed so the
+  A/B measures the architecture. Paper-faithful would be `type: adamw` plus `warmup_steps: 0`.
+- Weight decay is forced to 0.0: the 2D weights are re-normalized every step so decay is a no-op,
+  but the 1D scales are not, and decaying `alpha` toward 0 would freeze the residual stream.
+
+---
+
 ## 2026-09-09 (later) — The LR fix worked, and the packer was throwing away 17% of the corpus
 
 Ran the full epoch with `muon_lr: 0.02` (W&B run `hxjleaq0`). It works. Loss reached **3.589,

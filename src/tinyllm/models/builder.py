@@ -1,7 +1,11 @@
+import math
+
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from src.tinyllm.layers.registry import LAYER_REGISTRY
+from src.tinyllm.layers.ngpt import NGPTBlock
 from src.tinyllm.layers.transformer_block import TransformerBlock
 from src.tinyllm.models.base import BaseLLM
 from src.tinyllm.models.layers.rope import RotaryPositionalEmbedding
@@ -104,15 +108,32 @@ class DynamicModel(BaseLLM):
             ):
                 block_config[k] = v
 
+        # nGPT (arXiv:2410.01131) keeps every hidden state on the unit
+        # hypersphere. That changes three things here: the block becomes a
+        # normalized interpolation instead of a residual add, the final norm
+        # has nothing left to do, and the logits need an explicit scale
+        # because they are now bounded dot products of unit vectors.
+        self.ngpt = bool(cfg.get("ngpt", False))
+        if self.ngpt:
+            block_config["ngpt"] = True
+            for key in ("ngpt_alpha_init", "ngpt_alpha_scale"):
+                if cfg.get(key) is not None:
+                    block_config[key] = cfg[key]
+
         num_blocks = _first_key(blocks_cfg, "count", default=4)
+        block_cls = NGPTBlock if self.ngpt else TransformerBlock
         self.transformer_blocks = nn.ModuleList(
-            [TransformerBlock(block_config) for _ in range(num_blocks)]
+            [block_cls(block_config) for _ in range(num_blocks)]
         )
 
         head_cfg = _first_key(cfg, "head", default={})
-        norm_type = _first_key(head_cfg, "norm", default="layer_norm")
-        norm_cls = LAYER_REGISTRY.get(norm_type)
-        self.final_norm = norm_cls(d_model)
+        if self.ngpt:
+            # No final norm: the last block already returns a unit-norm vector.
+            self.final_norm = nn.Identity()
+        else:
+            norm_type = _first_key(head_cfg, "norm", default="layer_norm")
+            norm_cls = LAYER_REGISTRY.get(norm_type)
+            self.final_norm = norm_cls(d_model)
 
         self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
 
@@ -121,6 +142,49 @@ class DynamicModel(BaseLLM):
             self.lm_head.weight = self.token_embedding.weight
 
         self.apply(self._init_weights)
+
+        if self.ngpt:
+            from src.tinyllm.layers.ngpt import NGPTScale
+
+            self.logit_scale = NGPTScale(
+                vocab_size, 1.0, 1.0 / math.sqrt(d_model)
+            )
+            # Start on the sphere; every optimizer step puts us back on it.
+            self.normalize_weights()
+        else:
+            self.logit_scale = None
+
+    def lm_head_weight(self):
+        """Effective unembedding matrix.
+
+        The fused linear+CE kernel takes the weight and does the matmul itself,
+        so there is no logits tensor to scale afterwards. Scaling logit v by
+        s_z[v] is identical to scaling row v of the unembedding, so fold it in
+        here and both the fused and unfused paths get the same answer.
+        """
+        if self.logit_scale is None:
+            return self.lm_head.weight
+        return self.lm_head.weight * self.logit_scale().unsqueeze(1)
+
+    @torch.no_grad()
+    def normalize_weights(self):
+        """Project every weight matrix back onto the unit hypersphere.
+
+        nGPT enforces its constraint here rather than in the forward pass: the
+        optimizer takes an unconstrained step, and this retracts the result.
+        Must be called after every optimizer.step().
+        """
+        if not self.ngpt:
+            return
+        from src.tinyllm.layers.ngpt import l2norm
+
+        self.token_embedding.weight.copy_(
+            l2norm(self.token_embedding.weight, dim=-1)
+        )
+        if self.lm_head.weight is not self.token_embedding.weight:
+            self.lm_head.weight.copy_(l2norm(self.lm_head.weight, dim=-1))
+        for block in self.transformer_blocks:
+            block.normalize_weights()
 
     def forward(
         self, input_ids, mask=None, cu_seqlens=None, return_hidden=False
@@ -150,4 +214,4 @@ class DynamicModel(BaseLLM):
         hidden = self.final_norm(x)
         if return_hidden:
             return hidden  # [B, S, d_model] — caller handles lm_head + loss
-        return self.lm_head(hidden)
+        return F.linear(hidden, self.lm_head_weight())

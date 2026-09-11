@@ -38,11 +38,15 @@ def optimizer_factory(model, train_config):
 
     import torch
 
-    logger.info("Using AdamW optimizer")
+    # Configurable because nGPT requires 0.0: its 2D weights are re-projected
+    # onto the unit sphere after every step (so decay is a no-op) while its 1D
+    # learnable scales are not (so decay would wrongly drag them toward zero).
+    weight_decay = train_config.get("optimizer", {}).get("weight_decay", 0.1)
+    logger.info(f"Using AdamW optimizer (weight_decay={weight_decay})")
     return torch.optim.AdamW(
         model.parameters(),
         lr=train_config.get("init_lr", 3e-4),
-        weight_decay=0.1,
+        weight_decay=weight_decay,
         fused=True,
     )
 

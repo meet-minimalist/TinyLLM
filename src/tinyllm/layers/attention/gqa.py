@@ -1,3 +1,4 @@
+import math
 from typing import Optional, Tuple
 
 import torch
@@ -8,6 +9,7 @@ from src.tinyllm.layers.registry import LAYER_REGISTRY
 from src.tinyllm.models.base import make_block_causal_mask
 from src.tinyllm.models.layers.rope import apply_rotary_pos_emb
 from src.tinyllm.models.layers.normalization import RMSNorm
+from src.tinyllm.layers.ngpt import l2norm
 
 # Lazy flags — checked once at first forward to avoid repeated failed imports
 _HAS_FLASH_ATTN: Optional[bool] = None
@@ -75,6 +77,7 @@ class GQA(nn.Module):
         o_proj_bias: bool = False,
         use_qk_norm: bool = False,
         flash: bool = False,
+        ngpt: bool = False,
         **kwargs,
     ):
         super().__init__()
@@ -85,6 +88,8 @@ class GQA(nn.Module):
         self.num_kv_heads = num_kv_heads
         self.num_groups = num_heads // num_kv_heads
         self.flash = flash
+        self.ngpt = ngpt
+        self.emb_dim = emb_dim
 
         self.q_proj = nn.Linear(
             emb_dim, num_heads * self.head_dim, bias=qkv_bias
@@ -100,12 +105,38 @@ class GQA(nn.Module):
         )
         self.dropout = nn.Dropout(drop_prob)
 
-        if use_qk_norm:
+        if use_qk_norm and not ngpt:
             self.q_norm = RMSNorm(self.head_dim)
             self.k_norm = RMSNorm(self.head_dim)
         else:
             self.q_norm = None
             self.k_norm = None
+
+        if ngpt:
+            from src.tinyllm.layers.ngpt import NGPTScale
+
+            # nGPT replaces RMSNorm on q/k with L2 normalization per head plus
+            # a learned per-channel scale. q and k become unit vectors, so
+            # q.k lands in [-1, 1] and the usual 1/sqrt(d_k) would shrink the
+            # logits further; the paper multiplies by sqrt(d_k) instead.
+            scale = 1.0 / math.sqrt(emb_dim)
+            self.q_scale = NGPTScale(num_heads * self.head_dim, 1.0, scale)
+            self.k_scale = NGPTScale(num_kv_heads * self.head_dim, 1.0, scale)
+            self.softmax_scale = math.sqrt(self.head_dim)
+        else:
+            self.q_scale = None
+            self.k_scale = None
+            self.softmax_scale = self.head_dim**-0.5
+
+    @torch.no_grad()
+    def normalize_weights(self):
+        from src.tinyllm.layers.ngpt import normalize_linear_
+
+        # q/k/v read from the residual stream (embedding axis = in_features),
+        # o_proj writes back into it (embedding axis = out_features).
+        for proj in (self.q_proj, self.k_proj, self.v_proj):
+            normalize_linear_(proj, dim=1)
+        normalize_linear_(self.o_proj, dim=0)
 
     def forward(
         self,
@@ -143,6 +174,18 @@ class GQA(nn.Module):
         if cos is not None and sin is not None:
             q, k = apply_rotary_pos_emb(q, k, cos, sin)
 
+        if self.q_scale is not None:
+            # nGPT: unit-normalize every head vector, then apply the learned
+            # per-channel scale. This runs AFTER RoPE, matching the reference
+            # implementation — RoPE is a rotation so it cannot change the norm,
+            # but the scale has to act on the rotated channels.
+            q = l2norm(q) * self.q_scale().view(
+                1, self.num_heads, 1, self.head_dim
+            )
+            k = l2norm(k) * self.k_scale().view(
+                1, self.num_kv_heads, 1, self.head_dim
+            )
+
         B, H, S, D = q.shape
 
         if self.flash and cu_seqlens is not None and _check_flash_attn():
@@ -165,7 +208,7 @@ class GQA(nn.Module):
                 max_seqlen,
                 max_seqlen,
                 dropout_p=self.dropout.p if self.training else 0.0,
-                softmax_scale=self.head_dim**-0.5,
+                softmax_scale=self.softmax_scale,
                 causal=True,
             )
             attn_out = attn_out.reshape(B, S, H, D).transpose(1, 2)
@@ -186,7 +229,7 @@ class GQA(nn.Module):
                 k,
                 v,
                 block_mask=block_mask,
-                scale=self.head_dim**-0.5,
+                scale=self.softmax_scale,
             )
             attn_weights = None
 
@@ -210,6 +253,7 @@ class GQA(nn.Module):
                 attn_mask=attn_mask,
                 dropout_p=self.dropout.p if self.training else 0.0,
                 is_causal=attn_mask is None,
+                scale=self.softmax_scale,
             )
             attn_weights = None
 

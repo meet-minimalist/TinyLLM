@@ -86,6 +86,9 @@ class Trainer:
         self.global_step = 0
         self.global_tokens = 0
         self._consecutive_nonfinite = 0
+        # nGPT keeps its weights on the unit hypersphere by retracting after
+        # every optimizer step rather than constraining the forward pass.
+        self._normalizes_weights = getattr(model, "ngpt", False)
 
         self.model.to(self.device)
 
@@ -230,7 +233,9 @@ class Trainer:
                     inputs, cu_seqlens=cu_seqlens, return_hidden=True
                 )
                 B, S, D = hidden.shape
-                lm_weight = self.model.lm_head.weight
+                # nGPT folds its logit scale s_z into this matrix; the
+                # baseline returns lm_head.weight unchanged.
+                lm_weight = self.model.lm_head_weight()
                 # RMSNorm outputs fp32 even under autocast; CCE backward requires bf16/fp16.
                 amp_dtype = (
                     torch.bfloat16
@@ -293,6 +298,8 @@ class Trainer:
                 self.scaler.update()
             else:
                 self.optimizer.step()
+            if self._normalizes_weights:
+                self.model.normalize_weights()
             self.optimizer.zero_grad(set_to_none=True)
             self._step_lr()
 

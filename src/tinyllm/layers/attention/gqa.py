@@ -8,6 +8,7 @@ from src.tinyllm.layers.registry import LAYER_REGISTRY
 from src.tinyllm.models.base import make_block_causal_mask
 from src.tinyllm.models.layers.rope import apply_rotary_pos_emb
 from src.tinyllm.models.layers.normalization import RMSNorm
+from src.tinyllm.layers.xsa import apply_xsa
 
 # Lazy flags — checked once at first forward to avoid repeated failed imports
 _HAS_FLASH_ATTN: Optional[bool] = None
@@ -75,6 +76,7 @@ class GQA(nn.Module):
         o_proj_bias: bool = False,
         use_qk_norm: bool = False,
         flash: bool = False,
+        xsa: bool = False,
         **kwargs,
     ):
         super().__init__()
@@ -85,6 +87,7 @@ class GQA(nn.Module):
         self.num_kv_heads = num_kv_heads
         self.num_groups = num_heads // num_kv_heads
         self.flash = flash
+        self.xsa = xsa
 
         self.q_proj = nn.Linear(
             emb_dim, num_heads * self.head_dim, bias=qkv_bias
@@ -212,6 +215,18 @@ class GQA(nn.Module):
                 is_causal=attn_mask is None,
             )
             attn_weights = None
+
+        if self.xsa:
+            # v's head count tracks attn_out's only for tiers that expanded it
+            # (2/3, GQA repeat_interleave above); flash (tier 1) leaves v at
+            # num_kv_heads since it groups internally, so expand it here too —
+            # XSA needs one value vector per query head to subtract.
+            v_x = (
+                v.repeat_interleave(self.num_groups, dim=1)
+                if v.shape[1] != attn_out.shape[1]
+                else v
+            )
+            attn_out = apply_xsa(attn_out, v_x)
 
         attn_out = attn_out.transpose(1, 2).contiguous().view(b, s, -1)
         o_proj_output = self.o_proj(attn_out)

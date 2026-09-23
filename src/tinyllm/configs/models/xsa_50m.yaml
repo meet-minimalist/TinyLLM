@@ -1,0 +1,32 @@
+model_type: "dynamic"   # registry dispatch key (do not change)
+name: "xsa_50m"         # human label — drives logs + experiment folder
+tokenizer_name: "gpt2"
+
+# Exclusive Self-Attention (XSA, Zhai, arXiv:2603.09078): a two-line change to
+# standard self-attention that subtracts each token's own value vector out of
+# its attention output — z_i = y_i - (y_i . v_i) * v_i / ||v_i||^2 — forcing
+# attention to explain the token from context instead of restating itself.
+#
+# Identical dims to qwen3_50m.yaml so the two are a clean A/B at ~50M. The
+# only architectural difference is `xsa: true` below; everything else
+# (GQA, QK-RMSNorm, SwiGLU, RMSNorm, RoPE) is unchanged.
+d_model: 512
+vocab_size: 50304  # nearest multiple of 64 above GPT-2 vocab (50257)
+max_seq_len: 2048
+embedding: "rope_only"
+
+blocks:
+  count: 8
+  attention: "gqa"
+  num_heads: 8
+  num_kv_heads: 2     # 4:1 query-to-KV ratio; cuts KV projection params 4×
+  xsa: true           # subtract each token's self-value projection post-attention
+  ffn: "gated"        # SwiGLU: down(swish(gate(x)) * up(x))
+  norm: "rms"         # RMSNorm
+  ff_multiplier: 3.0  # hidden = 1536; matches qwen3_50m for a fair comparison
+  act_fn: "swish"     # SiLU gate (standard SwiGLU)
+  use_qk_norm: true   # Qwen3 signature: RMSNorm on per-head Q and K
+
+head:
+  norm: "rms"
+  tie_weights: true

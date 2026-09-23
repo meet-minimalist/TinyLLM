@@ -8,6 +8,7 @@ from src.tinyllm.layers.registry import LAYER_REGISTRY
 from src.tinyllm.models.base import make_block_causal_mask
 from src.tinyllm.models.layers.generate_qkv import QKVGen
 from src.tinyllm.models.layers.rope import apply_rotary_pos_emb
+from src.tinyllm.layers.xsa import apply_xsa
 
 # Lazy flags — checked once at first forward to avoid repeated failed imports
 _HAS_FLASH_ATTN: Optional[bool] = None
@@ -69,6 +70,7 @@ class MHA(nn.Module):
         num_heads: int,
         drop_prob: float = 0.0,
         flash: bool = False,
+        xsa: bool = False,
         **kwargs
     ):
         super().__init__()
@@ -78,6 +80,7 @@ class MHA(nn.Module):
         self.head_dim = emb_dim // num_heads
         self.scale = self.head_dim**-0.5
         self.flash = flash
+        self.xsa = xsa
 
         self.qkv_gen = QKVGen(emb_dim, num_heads)
         self.out_proj = nn.Linear(emb_dim, emb_dim)
@@ -150,6 +153,9 @@ class MHA(nn.Module):
                 is_causal=attn_mask is None,
             )
             attn_weights = None
+
+        if self.xsa:
+            attn_out = apply_xsa(attn_out, v)
 
         attn_out = attn_out.transpose(1, 2).contiguous().view(B, S, -1)
         o_proj_output = self.out_proj(attn_out)

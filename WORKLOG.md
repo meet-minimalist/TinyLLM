@@ -4,6 +4,64 @@ A running log of the work to train a tiny LLM from scratch. Newest entry first.
 
 ---
 
+## 2026-09-23 — Implemented Exclusive Self-Attention (branch `exp/XSA`, not for merge)
+
+Implemented XSA from arXiv:2603.09078 (Zhai, Apple) as an experiment branch, to A/B against the
+qwen3_50m baseline (loss 3.589 / PPL 36.2, same run as the nGPT A/B).
+
+The idea in one line: after computing standard attention output `y_i`, subtract the component of
+`y_i` that lies along the token's own value vector `v_i`:
+
+```
+z_i = y_i - (y_i . v_i) * v_i / ||v_i||^2
+```
+
+so `z_i` no longer contains `v_i` itself, nor any part of the context that's correlated with it —
+attention is forced to explain each token from the *rest* of the sequence instead of partly
+restating its own value. The paper describes it as a two-line change, and it is: normalize `v`,
+then subtract its projection out of `y`. No new weights, no optimizer/schedule implications — it's
+a deterministic correction on top of whatever attention kernel already ran.
+
+Landed as `apply_xsa()` in `layers/xsa.py`, called from both `GQA` and `MHA` right after the
+attention output comes back in `[B, H, S, D]` (per-head, before the heads get merged and pushed
+through `o_proj`) — the normalize in the formula is per head, along `head_dim`. Gated behind a new
+`xsa: bool` constructor arg, default `False`, flowing through `TransformerBlock`'s existing
+generic-kwargs passthrough, so it needed zero changes to `builder.py` or `factory.py` — same
+mechanism `use_qk_norm` already uses.
+
+**GQA subtlety.** Under grouped-query attention, multiple query heads share one KV head's value
+vector, so "the token's own value" for a query head is the *shared* v from its KV group, not a
+per-query-head value. The flash-attn tier (1) never expands `v` to the query-head count internally
+(flash handles the grouping), while the flex/SDPA tiers (2/3) already `repeat_interleave` `k`/`v` up
+front to work around SDPA having no native GQA support. So the XSA call compares `v`'s head count
+against `attn_out`'s and only repeats when they differ — tier-agnostic, and correct in all three
+attention tiers without special-casing which one ran.
+
+Added `configs/models/xsa_50m.yaml` (identical dims to `qwen3_50m.yaml`, `xsa: true` is the only
+architectural delta) and `configs/training/xsa_50m_h100.yaml` (byte-for-byte copy of
+`qwen3_50m_h100.yaml` — XSA adds no hyperparameters, so the training config needed no changes at
+all).
+
+**Verified locally (CPU, no GPU available here):** built the model, ran forward + backward through
+tier 3 (SDPA fallback) with `count: 2` blocks and confirmed every parameter gets a gradient; ran a
+forward pass through tier 2 (`flex_attention`, varlen/`cu_seqlens` path) and confirmed finite
+logits (flex_attention has no CPU backward, so backward wasn't exercised there — worth a quick
+sanity check on the actual H100 before trusting that path for real). Tier 1 (flash-attn) wasn't
+exercised at all — no `flash_attn` package on this machine — so the "expand v when head counts
+differ" branch is untested against a real flash-attn run; watch the first H100 startup log for
+which tier gets selected and re-verify loss curves aren't garbage if it's tier 1.
+
+**Open questions for the run:**
+- The paper applies XSA at every layer unconditionally; that's what this does. Worth checking
+  whether gains hold or fade at 8 layers / 512 dim — the paper's smallest reported size is larger.
+- `use_qk_norm: true` (Qwen3-style) is kept as-is; XSA only touches the post-softmax output, so
+  there's no expected interaction, but it hasn't been tested with `use_qk_norm: false` either.
+- Combining XSA with nGPT (`exp/nGPT`) hasn't been tried — the correction operates on raw
+  `attn_out`/`v` regardless of the nGPT sphere constraint, so it should compose, but that's a
+  separate experiment.
+
+---
+
 ## 2026-09-09 (later) — The LR fix worked, and the packer was throwing away 17% of the corpus
 
 Ran the full epoch with `muon_lr: 0.02` (W&B run `hxjleaq0`). It works. Loss reached **3.589,

@@ -4,6 +4,44 @@ A running log of the work to train a tiny LLM from scratch. Newest entry first.
 
 ---
 
+## 2026-09-30 — P0 foundations: resumable, multi-GPU training (branch `feat/p0-foundations`)
+
+Start of the end-to-end plan (`docs/END_TO_END_PLAN.md`). The goal of P0 is that a run can move
+between free 12 h sessions (Kaggle/Colab) and a rented 8-GPU node without losing anything.
+Architecture experiments now branch from `arch/base` (a copy of `main` at `ecc6cb5`).
+
+**What changed**
+
+| Area | Change |
+|---|---|
+| Step semantics | `step` = one optimizer update. It was one micro-batch, so with grad accumulation `num_training_steps` and the LR schedule (which stepped per update) did not agree. Chinchilla tokens/step now include accumulation and world size. |
+| Checkpoints | `utils/checkpoint.py`: model, optimizer, scheduler, scaler, counters, data position, RNG; atomic write; `keep_last` + `keep_every_steps` milestones; optional push/pull of the newest checkpoint to a private HF repo. Replaces `CheckpointCallback`. |
+| Resume | `run_name` gives a stable run folder; `resume: auto` continues from its newest checkpoint. `init_from` loads weights only (next stage). |
+| Session limits | `max_runtime_minutes` and SIGTERM save and exit cleanly; `save_every_minutes` saves on a timer. |
+| Data | One global batch order; rank/worker `c` takes batches `c, c+n, ...`; resume skips consumed batches without reading their tokens. |
+| DDP | `torchrun` works; `no_sync` during accumulation; stop/exhaust/save decisions are OR-ed over ranks so no rank waits forever; NaN steps are skipped on all ranks together via the (global) grad norm. |
+| Precision | `precision: auto` → bf16 on Ampere+, fp16 on T4/V100/P100. |
+| LR | `wsd` and `power` (Rigel's) schedules. |
+| Accounting | Total / embedding / active params, FLOPs per token, tokens/s and MFU in the log. |
+
+**Bugs found on the way**
+
+- `_CombinedOptimizer.load_state_dict` left the combined `param_groups` pointing at the old dicts.
+  `Optimizer.load_state_dict` replaces them, so after any resume the scheduler wrote LRs into
+  orphaned dicts and Muon/AdamW kept the checkpoint's LR forever. Caught by the bit-exact resume test.
+- fp16: a step with inf/NaN grads skipped `scaler.update()`, so the loss scale never went down and
+  every later step overflowed too.
+- Eval used full logits (OOM risk noted in the 09-09 entry); it now uses the same fused-CE path as
+  training, is sharded over ranks, and can be capped with `eval_max_batches`.
+
+**Verified**: 17 CPU tests (`python -m pytest tests`): data skip/sharding, schedules, stop+resume is
+bit-identical to a straight run (with and without accumulation), 2-rank gloo DDP equals 1 process
+with accumulation 2. On the RTX 3050: bf16 and fp16 runs through `train.py`, time-limit stop, then
+resume with the same command. Not yet verified: NCCL multi-GPU and the hub upload (no multi-GPU
+machine or `huggingface_hub` here).
+
+---
+
 ## 2026-09-09 (later) — The LR fix worked, and the packer was throwing away 17% of the corpus
 
 Ran the full epoch with `muon_lr: 0.02` (W&B run `hxjleaq0`). It works. Loss reached **3.589,

@@ -43,6 +43,11 @@ class WandbCallback(BaseCallback):
         global_step = kwargs.get("global_step", 0)
         self.wandb.log(metrics, step=global_step)
 
+    def on_evaluate(self, **kwargs):
+        self.wandb.log(
+            kwargs.get("metrics", {}), step=kwargs.get("global_step", 0)
+        )
+
     def on_epoch_end(self, **kwargs):
         metrics = kwargs.get("metrics", {})
         global_step = kwargs.get("global_step", 0)

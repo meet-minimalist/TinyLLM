@@ -1,9 +1,16 @@
+import contextlib
+import math
+import signal
+import time
+
 import torch
-from torchinfo import summary
 
 from src.tinyllm.callbacks.callback_handler import CallbackHandler
 from src.tinyllm.logger.logger_utils import logger
 from src.tinyllm.loss_fn.loss_helper import compute_ce_loss
+from src.tinyllm.utils.checkpoint import capture_rng, restore_rng
+from src.tinyllm.utils.distributed import DistInfo, all_reduce
+from src.tinyllm.utils.model_stats import peak_flops
 from src.tinyllm.utils.train_utils import get_autocast_ctx
 
 # The packer never pads — every position in a batch is a real token — so no
@@ -18,78 +25,132 @@ MAX_CONSECUTIVE_NONFINITE = 20
 
 
 class Trainer:
+    """Training loop. One ``step`` is one optimizer update.
+
+    A step consumes ``iters_to_accumulate`` micro-batches on every rank, so the
+    tokens per step are ``packed_tokens * iters_to_accumulate * world_size``.
+    ``num_training_steps``, the LR schedule, logging and checkpoints all count
+    optimizer steps.
+
+    Resume: ``state_dict()`` / ``load_state_dict()`` cover model, optimizer,
+    LR scheduler, GradScaler, counters, data position and RNG. The data
+    position is the number of micro-batches this rank consumed in the current
+    epoch; ``make_train_loader(skip_batches)`` rebuilds the loader past them.
+    """
+
     def __init__(
         self,
         model,
         optimizer,
         lr_scheduler,
         tokenizer,
-        train_loader,
+        make_train_loader,
         test_loader,
         train_config,
         model_config,
         device,
         callbacks,
+        dist_info: DistInfo | None = None,
+        ckpt_manager=None,
+        resume_state: dict | None = None,
+        flops_per_token: float | None = None,
     ):
-        self.model = model
         self.optimizer = optimizer
         self.lr_scheduler = lr_scheduler
         self.tokenizer = tokenizer
-        self.train_loader = train_loader
+        self.make_train_loader = make_train_loader
         self.test_loader = test_loader
         self.train_config = train_config
         self.model_config = model_config
         self.device = torch.device(device)
         self.callback_handler = CallbackHandler(callbacks)
+        self.dist = dist_info or DistInfo()
+        self.ckpt_manager = ckpt_manager
+        self.flops_per_token = flops_per_token
 
         # precision: "bf16" (default) | "fp16" | "fp32"
-        self.precision = getattr(train_config, "precision", "bf16")
+        self.precision = train_config.get("precision", "bf16")
         # GradScaler only needed for fp16 — bf16 has fp32 range, never overflows.
         if self.precision == "fp16":
             from torch.amp import GradScaler
 
-            self.scaler = GradScaler()
+            self.scaler = GradScaler(self.device.type)
         else:
             self.scaler = None
 
         # Fused linear+CE loss — avoids materializing [S, vocab] logits.
-        # Tries Liger (Linux) then cut-cross-entropy (Windows); falls back to standard CE.
+        # Tries Liger (Linux) then cut-cross-entropy (Windows); falls back to
+        # standard CE. Both fused kernels are GPU-only.
         from src.tinyllm.utils.kernels import try_fused_ce
 
-        label_smoothing = (
-            train_config.get("label_smoothing", 0.0)
-            if hasattr(train_config, "get")
-            else getattr(train_config, "label_smoothing", 0.0)
-        )
-        kernels_cfg = (
-            train_config.get("kernels", {})
-            if hasattr(train_config, "get")
-            else getattr(train_config, "kernels", {})
-        ) or {}
-        self._fused_ce, _backend = try_fused_ce(
-            ignore_index=IGNORE_INDEX,
-            label_smoothing=label_smoothing,
-            use_liger=kernels_cfg.get("use_liger", False),
-        )
+        label_smoothing = train_config.get("label_smoothing", 0.0)
+        kernels_cfg = train_config.get("kernels", {}) or {}
+        self._fused_ce, _backend = (None, None)
+        if self.device.type == "cuda":
+            self._fused_ce, _backend = try_fused_ce(
+                ignore_index=IGNORE_INDEX,
+                label_smoothing=label_smoothing,
+                use_liger=kernels_cfg.get("use_liger", False),
+            )
         if self._fused_ce is not None:
             logger.info(f"Using fused linear+CE loss (backend: {_backend})")
         else:
             logger.info("Fused CE not available; using standard cross-entropy.")
 
-        self.grad_accum = getattr(train_config, "use_grad_accum", False)
-        self.iters_to_accumulate = getattr(
-            train_config, "iters_to_accumulate", 1
+        self.iters_to_accumulate = (
+            train_config.get("iters_to_accumulate", 1)
+            if train_config.get("use_grad_accum", False)
+            else 1
         )
-        self.max_grad_norm = getattr(train_config, "max_grad_norm", None)
-        self.log_every = getattr(train_config, "log_every", 10)
+        self.max_grad_norm = train_config.get("max_grad_norm", None)
+        self.log_every = train_config.get("log_every", 10)
+        self.max_steps = train_config.get("num_training_steps", 0) or 0
+        self.num_epochs = train_config.get("num_epochs", 1)
+        self.eval_every_steps = train_config.get("eval_every_steps", 0) or 0
+        self.eval_max_batches = train_config.get("eval_max_batches", 0) or 0
+        self.save_every_steps = train_config.get("save_every_steps", 0) or 0
+        self.save_every_minutes = train_config.get("save_every_minutes", 0) or 0
+        # Stop (and save) before a hard session limit, e.g. Kaggle's 12 h.
+        self.max_runtime_minutes = (
+            train_config.get("max_runtime_minutes", 0) or 0
+        )
 
-        self.global_step = 0
-        self.global_tokens = 0
+        # Counters. All of these are saved in checkpoints.
+        self.step = 0  # optimizer steps
+        self.tokens = 0  # tokens trained on, all ranks
+        self.epoch = 0
+        self.batches_in_epoch = 0  # micro-batches this rank consumed this epoch
         self._consecutive_nonfinite = 0
+        self._last_saved_step = None
+        self._last_eval = None  # (step, loss, ppl) of the latest eval
 
-        self.model.to(self.device)
+        self._stop_signal = False
+        self._install_signal_handlers()
 
-        use_compile = getattr(train_config, "use_compile", True)
+        # Load weights before DDP wraps the model, so every rank starts equal.
+        self.raw_model = model.to(self.device)
+        if resume_state is not None:
+            self.load_state_dict(resume_state)
+
+        self.model = self.raw_model
+        if self.dist.enabled:
+            from torch.nn.parallel import DistributedDataParallel as DDP
+
+            # broadcast_buffers=False: the only buffers are deterministic RoPE /
+            # sinusoidal tables. Broadcasting them would add a collective to
+            # every forward, which hangs when ranks run different numbers of
+            # eval batches.
+            self.model = DDP(
+                self.raw_model,
+                device_ids=(
+                    [self.dist.local_rank]
+                    if self.device.type == "cuda"
+                    else None
+                ),
+                broadcast_buffers=False,
+            )
+
+        use_compile = train_config.get("use_compile", True)
         if use_compile and self.device.type == "cuda":
             # suppress_errors=True: allows graph breaks on ops torch.compile can't
             # trace (e.g. Liger's custom autograd functions in PyTorch 2.11).
@@ -104,110 +165,272 @@ class Trainer:
                 "Model compiled with torch.compile (default, dynamic=True)"
             )
 
-        self._log_model_summary()
+    # ------------------------------------------------------------------ state
+    def state_dict(self) -> dict:
+        return {
+            "model": self.raw_model.state_dict(),
+            "optimizer": self.optimizer.state_dict(),
+            "lr_scheduler": (
+                self.lr_scheduler.state_dict()
+                if hasattr(self.lr_scheduler, "state_dict")
+                else None
+            ),
+            "scaler": self.scaler.state_dict() if self.scaler else None,
+            "trainer": {
+                "step": self.step,
+                "tokens": self.tokens,
+                "epoch": self.epoch,
+                "batches_in_epoch": self.batches_in_epoch,
+                "world_size": self.dist.world_size,
+                "iters_to_accumulate": self.iters_to_accumulate,
+            },
+            "rng": capture_rng(),
+            "wandb_run_id": self.train_config.get("resume_wandb_id"),
+            "train_config": self.train_config.to_dict(),
+            "model_config": self.model_config.to_dict(),
+        }
 
-    def _log_model_summary(self):
-        input_ids = torch.zeros(
-            1,
-            self.model_config.max_seq_len,
-            dtype=torch.int32,
-            device=self.device,
-        )
-        try:
-            summary(self.model, input_data=[input_ids], verbose=0)
-        except Exception:
-            pass
-        params = list(self.model.parameters())
-        n_params = sum(p.numel() for p in params)
-        n_trainable = sum(p.numel() for p in params if p.requires_grad)
-        # element_size() = bytes per element for the param's dtype (fp32 -> 4).
-        param_bytes = sum(p.numel() * p.element_size() for p in params)
-
-        def _fmt(n: int) -> str:
-            for unit, scale in (("B", 1e9), ("M", 1e6), ("K", 1e3)):
-                if n >= scale:
-                    return f"{n / scale:.2f}{unit}"
-            return str(n)
-
-        model_name = self.model_config.get("name") or self.model_config.get(
-            "model_type", "experiment"
-        )
+    def load_state_dict(self, state: dict) -> None:
+        self.raw_model.load_state_dict(state["model"])
+        self.optimizer.load_state_dict(state["optimizer"])
+        if state.get("lr_scheduler") and hasattr(
+            self.lr_scheduler, "load_state_dict"
+        ):
+            self.lr_scheduler.load_state_dict(state["lr_scheduler"])
+        if self.scaler is not None and state.get("scaler"):
+            self.scaler.load_state_dict(state["scaler"])
+        t = state["trainer"]
+        self.step = t["step"]
+        self.tokens = t["tokens"]
+        self.epoch = t["epoch"]
+        self.batches_in_epoch = t["batches_in_epoch"]
+        if t.get("world_size", 1) != self.dist.world_size:
+            # The data position is per rank, so it only maps 1:1 onto the same
+            # world size. With a different one, start the epoch's data over
+            # from this rank's share instead of silently mis-skipping.
+            logger.warning(
+                f"Checkpoint was written with world_size={t.get('world_size')} "
+                f"but this run has {self.dist.world_size}; the data position "
+                f"cannot be mapped exactly. Skipping "
+                f"{self.batches_in_epoch * t.get('world_size', 1) // self.dist.world_size} "
+                f"batches per rank (approximate)."
+            )
+            self.batches_in_epoch = (
+                self.batches_in_epoch
+                * t.get("world_size", 1)
+                // self.dist.world_size
+            )
+        restore_rng(state.get("rng"))
         logger.info(
-            f"Model: {model_name} — "
-            f"{_fmt(n_params)} params ({n_params:,}), "
-            f"{_fmt(n_trainable)} trainable, "
-            f"{param_bytes / 1024 ** 2:.1f} MB"
+            f"Resumed at step {self.step:,} (epoch {self.epoch}, "
+            f"{self.tokens:,} tokens, {self.batches_in_epoch:,} batches into the epoch)"
         )
 
+    def save_checkpoint(self) -> None:
+        if self.ckpt_manager is not None and self._last_saved_step != self.step:
+            self.ckpt_manager.save(self.state_dict(), self.step)
+            self._last_saved_step = self.step
+
+    # ---------------------------------------------------------------- signals
+    def _install_signal_handlers(self):
+        """SIGTERM/SIGINT ask for a clean stop: save, then exit."""
+
+        def _handler(signum, frame):
+            logger.warning(
+                f"Signal {signum} received: will save and stop after this step."
+            )
+            self._stop_signal = True
+
+        try:
+            signal.signal(signal.SIGTERM, _handler)
+        except (ValueError, AttributeError):  # not main thread / platform
+            pass
+
+    def _time_up(self) -> bool:
+        if not self.max_runtime_minutes:
+            return False
+        return (
+            time.time() - self._start_time
+        ) / 60.0 >= self.max_runtime_minutes
+
+    def _sync_flags(self, *flags: bool) -> list[bool]:
+        """OR each flag across ranks, so every rank takes the same branch."""
+        if not self.dist.enabled:
+            return list(flags)
+        t = torch.tensor([float(f) for f in flags], device=self.device)
+        all_reduce(t, op=torch.distributed.ReduceOp.MAX)
+        return [bool(v > 0) for v in t.tolist()]
+
+    # ------------------------------------------------------------------- loop
     def train(self):
+        self._start_time = time.time()
+        self._last_save_time = self._start_time
+        self._log_t0 = time.time()
+        self._log_tokens0 = self.tokens
+
         self.callback_handler.on_train_begin(
             train_config=self.train_config,
             model_config=self.model_config,
-            model=self.model,
+            model=self.raw_model,
             tokenizer=self.tokenizer,
             device=self.device,
         )
-        for epoch in range(self.train_config.num_epochs):
-            self._run_epoch(epoch)
 
+        stopped_early = False
+        while self.epoch < self.num_epochs:
+            outcome = self._train_epoch()
+            if outcome == "stop":
+                stopped_early = True
+                break
+            if outcome == "max_steps":
+                break
+            # Data exhausted: end of epoch.
+            self._end_epoch()
+            self.epoch += 1
+            self.batches_in_epoch = 0
+
+        if stopped_early:
+            self.save_checkpoint()
+            logger.info(
+                f"Stopped at step {self.step:,} to respect the time limit / "
+                f"signal. Run the same command again to resume."
+            )
+        else:
+            if self.epoch < self.num_epochs:  # ended on max_steps
+                self._end_epoch()
+            self.save_checkpoint()
+            logger.info(f"Training complete at step {self.step:,}.")
+
+        if self.ckpt_manager is not None:
+            self.ckpt_manager.wait()
         self.callback_handler.on_train_end()
 
-    def _run_epoch(self, epoch: int):
-        self.callback_handler.on_epoch_begin(
-            epoch=epoch, global_step=self.global_step
-        )
-        self._epoch_train()
-        eval_loss, eval_ppl = self._epoch_eval()
-
-        self.callback_handler.on_epoch_end(
-            epoch=epoch,
-            global_step=self.global_step,
-            test_loss=eval_loss,
-            test_ppl=eval_ppl,
-            model=self.model.state_dict(),
-            optimizer=(
-                self.optimizer.state_dict()
-                if hasattr(self.optimizer, "state_dict")
-                else None
-            ),
-            scaler=self.scaler.state_dict() if self.scaler else None,
-            metrics={
-                "epoch": epoch,
-                "eval_loss": eval_loss,
-                "eval_ppl": eval_ppl,
-            },
-        )
-        logger.info(
-            f"Epoch {epoch + 1}/{self.train_config.num_epochs} — "
-            f"Eval Loss: {eval_loss:.4f}, Eval PPL: {eval_ppl:.4f}"
-        )
-
-    def _epoch_train(self):
+    def _train_epoch(self) -> str:
+        """Returns "exhausted", "max_steps" or "stop"."""
         self.model.train()
-        max_steps = self.train_config.get("num_training_steps", 0) or 0
-        if max_steps == 0 and self.train_config.get("num_epochs", 1) > 0:
-            # run until dataloader exhausts or max_batches limit is hit
-            pass
-        try:
-            total = len(self.train_loader)
-        except TypeError:
-            total = (
-                self.train_config.get("max_batches", 0)
-                or max_steps
-                or 1_000_000_000
-            )
-        for batch_idx, batched_input in enumerate(self.train_loader):
-            if max_steps and self.global_step >= max_steps:
-                logger.info(f"Reached {max_steps} steps, stopping training")
-                return
-            self._step_train(batched_input, batch_idx, total)
+        data_iter = iter(self.make_train_loader(self.batches_in_epoch))
+        while True:
+            if self.max_steps and self.step >= self.max_steps:
+                logger.info(f"Reached {self.max_steps:,} steps.")
+                return "max_steps"
 
-    def _step_train(self, batched_input, batch_idx, total_batches):
-        if len(batched_input) == 3:
-            inputs, targets, cu_seqlens = batched_input
+            batches = []
+            for _ in range(self.iters_to_accumulate):
+                try:
+                    batches.append(next(data_iter))
+                except StopIteration:
+                    break
+
+            save_due = bool(
+                self.save_every_minutes
+                and (time.time() - self._last_save_time) / 60.0
+                >= self.save_every_minutes
+            )
+            exhausted, stop, save_due = self._sync_flags(
+                len(batches) < self.iters_to_accumulate,
+                self._stop_signal or self._time_up(),
+                save_due,
+            )
+            if exhausted:
+                # A partial accumulation window at the end of the data is
+                # dropped, so every step has the same token count.
+                return "exhausted"
+            if stop:
+                return "stop"
+
+            self._train_step(batches)
+
+            if save_due or (
+                self.save_every_steps and self.step % self.save_every_steps == 0
+            ):
+                self.save_checkpoint()
+                self._last_save_time = time.time()
+            if self.eval_every_steps and self.step % self.eval_every_steps == 0:
+                self._run_eval(tag="eval")
+                self.model.train()
+
+    def _train_step(self, batches):
+        self.callback_handler.on_train_step_begin(
+            global_step=self.step, batch_idx=self.batches_in_epoch
+        )
+
+        loss_sum = torch.zeros((), device=self.device)
+        local_tokens = 0
+        for i, batch in enumerate(batches):
+            last = i == len(batches) - 1
+            # Skip the DDP gradient all-reduce on all but the last micro-batch.
+            sync_ctx = (
+                self.model.no_sync()
+                if self.dist.enabled
+                and not last
+                and hasattr(self.model, "no_sync")
+                else contextlib.nullcontext()
+            )
+            with sync_ctx:
+                loss, n_tokens = self._forward_loss(batch)
+                loss = loss / len(batches)
+                # Always run backward, even for a non-finite loss: under DDP a
+                # rank that skipped backward would leave the others waiting in
+                # the all-reduce forever. The NaN reaches the gradient norm,
+                # which is identical on every rank, and all ranks skip together.
+                if self.scaler is not None:
+                    self.scaler.scale(loss).backward()
+                else:
+                    loss.backward()
+            loss_sum += loss.detach()
+            local_tokens += n_tokens
+        self.batches_in_epoch += len(batches)
+
+        if self.scaler is not None:
+            self.scaler.unscale_(self.optimizer)
+        grad_norm = torch.nn.utils.clip_grad_norm_(
+            self.raw_model.parameters(),
+            self.max_grad_norm if self.max_grad_norm else float("inf"),
+        )
+
+        finite = bool(torch.isfinite(grad_norm))
+        if self.scaler is not None:
+            # fp16: an overflow is routine. scaler.step skips the update and
+            # scaler.update lowers the scale; skipping both would keep the scale
+            # too high and overflow on every step after. Only a long run of
+            # overflows means the model itself is broken.
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+            if not finite:
+                self._consecutive_nonfinite += 1
+                if self._consecutive_nonfinite >= MAX_CONSECUTIVE_NONFINITE:
+                    self._report_nonfinite(loss_sum, grad_norm, batches)
+                self.optimizer.zero_grad(set_to_none=True)
+                if hasattr(self.lr_scheduler, "step"):
+                    self.lr_scheduler.step()
+                self.step += 1
+                self.tokens += local_tokens * self.dist.world_size
+                return
+        elif not finite:
+            self.optimizer.zero_grad(set_to_none=True)
+            self._report_nonfinite(loss_sum, grad_norm, batches)
+            return
         else:
-            inputs, targets = batched_input
-            cu_seqlens = None
+            self.optimizer.step()
+        self._consecutive_nonfinite = 0
+        self.optimizer.zero_grad(set_to_none=True)
+        if hasattr(self.lr_scheduler, "step"):
+            self.lr_scheduler.step()
+
+        self.step += 1
+        # Every rank processes the same token count per micro-batch in packed
+        # mode, so the global count is local * world_size.
+        self.tokens += local_tokens * self.dist.world_size
+
+        if self.step % self.log_every == 0:
+            self._log_step(loss_sum, grad_norm)
+
+    def _forward_loss(self, batch):
+        """Returns (mean loss over the batch's tokens, number of tokens)."""
+        if len(batch) == 3:
+            inputs, targets, cu_seqlens = batch
+        else:
+            (inputs, targets), cu_seqlens = batch, None
 
         # Move to device here (not in dataset) so pin_memory + non_blocking
         # can overlap transfer with GPU compute when num_workers > 0.
@@ -216,21 +439,14 @@ class Trainer:
         if cu_seqlens is not None:
             cu_seqlens = cu_seqlens.to(self.device, non_blocking=True)
 
-        self.callback_handler.on_train_step_begin(
-            global_step=self.global_step,
-            batch_idx=batch_idx,
-        )
-
-        autocast_ctx = get_autocast_ctx(self.device, self.precision)
-        with autocast_ctx:
+        with get_autocast_ctx(self.device, self.precision):
             if self._fused_ce is not None:
                 # Fused path: hidden states → lm_head + softmax + CE in one kernel.
-                # Avoids materializing [S, vocab_size] logits (~100 MB for vocab=50304).
+                # Avoids materializing [S, vocab_size] logits.
                 hidden = self.model(
                     inputs, cu_seqlens=cu_seqlens, return_hidden=True
                 )
                 B, S, D = hidden.shape
-                lm_weight = self.model.lm_head.weight
                 # RMSNorm outputs fp32 even under autocast; CCE backward requires bf16/fp16.
                 amp_dtype = (
                     torch.bfloat16
@@ -239,7 +455,7 @@ class Trainer:
                 )
                 loss = self._fused_ce(
                     hidden.view(B * S, D).to(amp_dtype),
-                    lm_weight,
+                    self.raw_model.lm_head.weight,
                     targets.view(B * S),
                 )
             else:
@@ -250,114 +466,90 @@ class Trainer:
                     self.train_config.get("label_smoothing", 0.0),
                     IGNORE_INDEX,
                 )
-            loss = loss / self.iters_to_accumulate
+        return loss, inputs.numel()
 
-        # A non-finite loss poisons every parameter the moment optimizer.step()
-        # runs, and it is unrecoverable: clip_grad_norm_ does not filter NaN
-        # (error_if_nonfinite defaults to False), so the corruption spreads
-        # silently and every later step trains on garbage. Skip the batch.
-        if not torch.isfinite(loss):
-            self._report_nonfinite("loss", loss, inputs, cu_seqlens, batch_idx)
-            self.optimizer.zero_grad(set_to_none=True)
-            return
+    # ---------------------------------------------------------------- logging
+    def _log_step(self, loss_sum, grad_norm):
+        loss_t = loss_sum.detach().clone()
+        all_reduce(loss_t)
+        loss_value = loss_t.item() / self.dist.world_size
+        ppl = math.exp(min(loss_value, 50.0))
+        lr = self.optimizer.param_groups[0]["lr"]
 
+        now = time.time()
+        dt = max(now - self._log_t0, 1e-9)
+        tok_per_s = (self.tokens - self._log_tokens0) / dt
+        self._log_t0, self._log_tokens0 = now, self.tokens
+
+        metrics = {
+            "train_loss": loss_value,
+            "train_ppl": ppl,
+            "lr": lr,
+            "tokens": self.tokens,
+            "grad_norm": float(grad_norm),
+            "tokens_per_sec": tok_per_s,
+        }
+        mfu_str = ""
+        if self.flops_per_token and self.device.type == "cuda":
+            peak = peak_flops(torch.cuda.get_device_name(self.device))
+            if peak:
+                mfu = (
+                    self.flops_per_token
+                    * tok_per_s
+                    / (peak * self.dist.world_size)
+                )
+                metrics["mfu"] = mfu
+                mfu_str = f", MFU: {mfu:.1%}"
         if self.scaler is not None:
-            self.scaler.scale(loss).backward()
-        else:
-            loss.backward()
+            metrics["loss_scale"] = self.scaler.get_scale()
 
-        should_step = (not self.grad_accum) or (
-            (batch_idx + 1) % self.iters_to_accumulate == 0
-            or (batch_idx + 1 == total_batches)
+        total = f"/{self.max_steps:,}" if self.max_steps else ""
+        logger.info(
+            f"Step: {self.step:,}{total}, Loss: {loss_value:.4f}, "
+            f"PPL: {ppl:.2f}, LR: {lr:.6f}, GradNorm: {float(grad_norm):.3f}, "
+            f"Tok/s: {tok_per_s:,.0f}{mfu_str}, Tokens: {self.tokens:,}"
         )
 
-        if should_step:
-            if self.scaler is not None:
-                self.scaler.unscale_(self.optimizer)
-            if self.max_grad_norm is not None:
-                grad_norm = torch.nn.utils.clip_grad_norm_(
-                    self.model.parameters(), self.max_grad_norm
-                )
-                # The loss can be finite while the backward pass still produces
-                # NaN/Inf grads, so check the norm clip_grad_norm_ already
-                # computed rather than paying for a second pass.
-                if not torch.isfinite(grad_norm):
-                    self._report_nonfinite(
-                        "grad_norm", grad_norm, inputs, cu_seqlens, batch_idx
-                    )
-                    self.optimizer.zero_grad(set_to_none=True)
-                    return
-            self._consecutive_nonfinite = 0
-            if self.scaler is not None:
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
-            else:
-                self.optimizer.step()
-            self.optimizer.zero_grad(set_to_none=True)
-            self._step_lr()
+        self.callback_handler.on_train_step_end(
+            global_step=self.step,
+            metrics=metrics,
+            model=self.raw_model,
+            optimizer=self.optimizer,
+            scaler=self.scaler,
+            tokenizer=self.tokenizer,
+            device=self.device,
+        )
 
-        self.global_step += 1
-        self.global_tokens += inputs.numel()
-
-        if (batch_idx + 1) % self.log_every == 0 or (
-            batch_idx + 1 == total_batches
-        ):
-            lr = (
-                self.optimizer.param_groups[0]["lr"]
-                if hasattr(self.optimizer, "param_groups")
-                else 0
-            )
-            ppl = torch.exp(loss * self.iters_to_accumulate).item()
-            loss_value = loss.item() * self.iters_to_accumulate
-            logger.info(
-                f"Step: {self.global_step}/{total_batches}, "
-                f"Loss: {loss_value:.4f}, PPL: {ppl:.4f}, "
-                f"LR: {lr:.6f}, Tokens: {self.global_tokens}"
-            )
-
-            self.callback_handler.on_train_step_end(
-                global_step=self.global_step,
-                metrics={
-                    "train_loss": loss_value,
-                    "train_ppl": ppl,
-                    "lr": lr,
-                    "tokens": self.global_tokens,
-                },
-                model=self.model,
-                optimizer=self.optimizer,
-                scaler=self.scaler,
-                tokenizer=self.tokenizer,
-                device=self.device,
-            )
-
-    def _report_nonfinite(self, what, value, inputs, cu_seqlens, batch_idx):
-        """Log everything needed to identify the offending batch, then decide
-        whether to keep going. Skipping is only safe for isolated batches — a
-        run that cannot produce a finite loss is burning GPU time, so abort
-        once the failures become consecutive."""
+    def _report_nonfinite(self, loss_sum, grad_norm, batches):
+        """Log enough to identify the offending batch, then decide whether to
+        keep going. Skipping is only safe for isolated batches — a run that
+        cannot produce a finite loss is burning GPU time, so abort once the
+        failures become consecutive."""
         self._consecutive_nonfinite += 1
 
         details = [
-            f"step={self.global_step}",
-            f"batch_idx={batch_idx}",
-            f"{what}={value.item()}",
-            f"inputs={tuple(inputs.shape)}",
-            f"token_id_range=[{inputs.min().item()}, {inputs.max().item()}]",
+            f"step={self.step}",
+            f"batches_in_epoch={self.batches_in_epoch}",
+            f"loss={loss_sum.item()}",
+            f"grad_norm={grad_norm.item()}",
         ]
-        if cu_seqlens is not None:
-            seg_lens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
-            zero_at = [i for i, L in enumerate(seg_lens) if L == 0]
-            details += [
-                f"num_segments={len(seg_lens)}",
-                f"segment_len_min={min(seg_lens)}",
-                f"segment_len_max={max(seg_lens)}",
-                f"zero_length_segments={len(zero_at)}",
-            ]
-            if zero_at:
-                details.append(f"zero_length_at={zero_at[:16]}")
+        for i, batch in enumerate(batches):
+            inputs = batch[0]
+            details.append(
+                f"mb{i}: inputs={tuple(inputs.shape)} "
+                f"token_id_range=[{inputs.min().item()}, {inputs.max().item()}]"
+            )
+            if len(batch) == 3:
+                cu = batch[2]
+                seg_lens = (cu[1:] - cu[:-1]).tolist()
+                details.append(
+                    f"mb{i}: segments={len(seg_lens)} "
+                    f"len=[{min(seg_lens)}, {max(seg_lens)}] "
+                    f"zero_length={sum(1 for L in seg_lens if L == 0)}"
+                )
 
         logger.error(
-            f"Non-finite {what} — skipping batch "
+            f"Non-finite loss/grad — skipping step "
             f"({self._consecutive_nonfinite}/{MAX_CONSECUTIVE_NONFINITE} "
             f"consecutive). " + ", ".join(details)
         )
@@ -365,37 +557,53 @@ class Trainer:
         if self._consecutive_nonfinite >= MAX_CONSECUTIVE_NONFINITE:
             raise RuntimeError(
                 f"{self._consecutive_nonfinite} consecutive non-finite steps "
-                f"at step {self.global_step}. The model is very likely already "
+                f"at step {self.step}. The model is very likely already "
                 f"corrupted; stopping instead of training on garbage."
             )
 
-    def _step_lr(self):
-        if hasattr(self.lr_scheduler, "step"):
-            self.lr_scheduler.step()
+    # ------------------------------------------------------------------- eval
+    def _end_epoch(self):
+        eval_loss, eval_ppl = self._run_eval(tag="epoch")
+        self.callback_handler.on_epoch_end(
+            epoch=self.epoch,
+            global_step=self.step,
+            test_loss=eval_loss,
+            test_ppl=eval_ppl,
+            metrics={
+                "epoch": self.epoch,
+                "eval_loss": eval_loss,
+                "eval_ppl": eval_ppl,
+            },
+        )
 
-    def _epoch_eval(self):
+    @torch.no_grad()
+    def _run_eval(self, tag: str):
+        """Mean loss over the (rank-sharded) test loader, averaged over ranks."""
+        if self.test_loader is None:
+            return float("nan"), float("nan")
+        if self._last_eval is not None and self._last_eval[0] == self.step:
+            return self._last_eval[1], self._last_eval[2]
         self.model.eval()
-        total_loss = 0.0
-        n_steps = 0
-        autocast_ctx = get_autocast_ctx(self.device, self.precision)
-        with torch.no_grad(), autocast_ctx:
-            for batched_input in self.test_loader:
-                # Unpack: varlen -> (inputs, targets, cu_seqlens), fixed -> (inputs, targets)
-                if len(batched_input) == 3:
-                    inputs, targets, cu_seqlens = batched_input
-                else:
-                    inputs, targets = batched_input
-                    cu_seqlens = None
-                inputs = inputs.to(self.device, non_blocking=True)
-                targets = targets.to(self.device, non_blocking=True)
-                if cu_seqlens is not None:
-                    # flash_attn_varlen_func requires this on the same device;
-                    # the training path already moves it.
-                    cu_seqlens = cu_seqlens.to(self.device, non_blocking=True)
-                logits = self.model(inputs, cu_seqlens=cu_seqlens)
-                loss = compute_ce_loss(logits, targets, 0.0, IGNORE_INDEX)
-                total_loss += loss.item()
-                n_steps += 1
-
-        avg_loss = total_loss / max(n_steps, 1)
-        return avg_loss, torch.exp(torch.tensor(avg_loss)).item()
+        totals = torch.zeros(
+            2, device=self.device
+        )  # [sum of losses, n batches]
+        for i, batch in enumerate(self.test_loader):
+            if self.eval_max_batches and i >= self.eval_max_batches:
+                break
+            loss, _ = self._forward_loss(batch)
+            totals[0] += loss.float()
+            totals[1] += 1
+        all_reduce(totals)
+        avg_loss = (totals[0] / totals[1].clamp(min=1)).item()
+        ppl = math.exp(min(avg_loss, 50.0))
+        self._last_eval = (self.step, avg_loss, ppl)
+        logger.info(
+            f"[{tag}] step {self.step:,} — Eval Loss: {avg_loss:.4f}, "
+            f"Eval PPL: {ppl:.2f}"
+        )
+        if tag == "eval":
+            self.callback_handler.on_evaluate(
+                global_step=self.step,
+                metrics={"eval_loss": avg_loss, "eval_ppl": ppl},
+            )
+        return avg_loss, ppl

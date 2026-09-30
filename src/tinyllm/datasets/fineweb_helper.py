@@ -46,6 +46,11 @@ class DataLoaderConfig:
     prefetch_factor: int = 2
     prefetch_queue_size: int = 2  # background thread queue depth (0 = disabled)
 
+    # Data parallelism + resume
+    rank: int = 0
+    world_size: int = 1
+    skip_batches: int = 0  # batches this rank already consumed (resume)
+
 
 # =============================================================================
 # Low-level I/O Utilities
@@ -140,6 +145,13 @@ class NanoGPTDataset(IterableDataset):
     """
     Memory-efficient dataloader supporting both varlen-packed and fixed-batch modes.
     Switch modes by changing DataLoaderConfig.mode
+
+    Batches form one deterministic global sequence over all shards, indexed
+    0, 1, 2, ... Each consumer (one DataLoader worker on one rank) takes every
+    ``n_consumers``-th batch, so ranks and workers never see the same data.
+    Planning a batch (which token ranges it holds) is cheap; only the batches a
+    consumer keeps are read from disk. That makes resume cheap too: a consumer
+    skips the batches it already delivered without reading them.
     """
 
     def __init__(self, cfg: DataLoaderConfig):
@@ -164,21 +176,25 @@ class NanoGPTDataset(IterableDataset):
             return True
         return False
 
-    def _worker_files(self):
-        """Return the file subset this worker is responsible for."""
-        info = torch.utils.data.get_worker_info()
-        if info is None:
-            return self._files  # single-process: all files
-        # Shard files across workers so each worker reads a disjoint subset
-        return self._files[info.id :: info.num_workers]
+    def _consumer(self) -> Tuple[int, int, int]:
+        """Return (consumer_id, n_consumers, batches_to_skip) for this worker.
 
-    def _iter_varlen(
-        self,
-    ) -> Iterator[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
-        """Yields: (inputs [N], targets [N], cu_seqlens [M+1]) on CPU."""
-        for file_path in self._worker_files():
-            if self._should_stop():
-                return
+        The DataLoader takes batches from its workers round-robin, starting at
+        worker 0. So if this rank already delivered ``skip_batches`` batches,
+        worker ``w`` produced ``ceil((skip_batches - w) / W)`` of them.
+        """
+        info = torch.utils.data.get_worker_info()
+        w, W = (0, 1) if info is None else (info.id, info.num_workers)
+        cfg = self.cfg
+        consumer = cfg.rank * W + w
+        n_consumers = cfg.world_size * W
+        skip = max(0, -(-(cfg.skip_batches - w) // W))
+        return consumer, n_consumers, skip
+
+    # --- Batch plans: cheap descriptors, no token reads -----------------------
+    def _plan_varlen(self) -> Iterator[Tuple[dict, list, list]]:
+        """Yields (shard, starts, ends): the token ranges packed into one batch."""
+        for file_path in self._files:
             shard = _load_data_shard_lazy(file_path)
             scanner = BOSScanner(shard, self.cfg.bos_token)
             bos_idx = scanner.get_indices()
@@ -208,8 +224,8 @@ class NanoGPTDataset(IterableDataset):
                         start + self.cfg.max_seq_len,
                         start + target_len - cur_len,
                     )
-                    starts.append(start)
-                    ends.append(end)
+                    starts.append(int(start))
+                    ends.append(int(end))
                     cur_len += end - start
 
                     # Only move to the next document once this one is fully
@@ -225,79 +241,83 @@ class NanoGPTDataset(IterableDataset):
 
                 if cur_len < 2:
                     continue  # need at least input+target
+                yield shard, starts, ends
 
-                # Read & concatenate segments
-                segments = [
-                    _read_tokens_slice(shard, s, e)
-                    for s, e in zip(starts, ends)
-                ]
-                buf = torch.cat(segments)
-
-                # Shift for targets
-                inputs = buf[:-1]
-                targets = buf[1:]
-
-                # Build cu_seqlens (reflects buf length = packed_tokens+1).
-                # Clamp to input length (inputs = buf[:-1], removing the +1
-                # shift token). That clamp pulls the final boundary down by
-                # one, so a last segment of length 1 collapses to length 0 and
-                # leaves a duplicated boundary (~1 batch in 500).
-                # flash_attn_varlen_func treats a zero-length segment as
-                # undefined behaviour, so drop duplicates here — before the
-                # tensor is built, to keep it pinned in one allocation.
-                max_len = inputs.shape[0]
-                cum_len = [0]
-                for s, e in zip(starts, ends):
-                    boundary = min(cum_len[-1] + (e - s), max_len)
-                    if boundary != cum_len[-1]:
-                        cum_len.append(boundary)
-                cu_seqlens = torch.tensor(
-                    cum_len, dtype=torch.int32, pin_memory=True
-                )
-
-                # Add batch dim for model compatibility
-                inputs = inputs.unsqueeze(0)
-                targets = targets.unsqueeze(0)
-
-                # Yield CPU tensors — GPU transfer is handled by the trainer
-                # so that pin_memory + non_blocking works correctly with workers.
-                self._batch_count += 1
-                self._token_count += inputs.shape[-1]
-                yield inputs, targets, cu_seqlens
-                if self._should_stop():
-                    return
-
-    def _iter_fixed(self) -> Iterator[Tuple[torch.Tensor, torch.Tensor]]:
-        """Yields: (inputs [B, S], targets [B, S]) on CPU."""
-        for file_path in self._worker_files():
-            if self._should_stop():
-                return
+    def _plan_fixed(self) -> Iterator[Tuple[dict, int]]:
+        """Yields (shard, pos): the start of one [batch_size, seq_len+1] block."""
+        for file_path in self._files:
             shard = _load_data_shard_lazy(file_path)
             total = shard["num_tokens"]
             chunk_len = self.cfg.batch_size * (self.cfg.seq_len + 1)
             pos = 0
-
             while pos + chunk_len <= total:
-                if self._should_stop():
-                    return
-                buf = _read_tokens_slice(shard, pos, pos + chunk_len)
-                buf = buf.view(self.cfg.batch_size, self.cfg.seq_len + 1)
-
-                inputs = buf[:, :-1]
-                targets = buf[:, 1:]
+                yield shard, pos
                 pos += self.cfg.batch_size * self.cfg.seq_len
 
-                self._batch_count += 1
-                self._token_count += inputs.numel()
-                yield inputs, targets
+    # --- Materialise one planned batch ----------------------------------------
+    def _read_varlen(self, shard, starts, ends):
+        """Returns (inputs [1, N], targets [1, N], cu_seqlens [M+1]) on CPU."""
+        segments = [
+            _read_tokens_slice(shard, s, e) for s, e in zip(starts, ends)
+        ]
+        buf = torch.cat(segments)
 
-    def __iter__(self) -> Iterator[Union[Tuple, Tuple]]:
+        # Shift for targets
+        inputs = buf[:-1]
+        targets = buf[1:]
+
+        # Build cu_seqlens (reflects buf length = packed_tokens+1).
+        # Clamp to input length (inputs = buf[:-1], removing the +1
+        # shift token). That clamp pulls the final boundary down by
+        # one, so a last segment of length 1 collapses to length 0 and
+        # leaves a duplicated boundary (~1 batch in 500).
+        # flash_attn_varlen_func treats a zero-length segment as
+        # undefined behaviour, so drop duplicates here — before the
+        # tensor is built, to keep it pinned in one allocation.
+        max_len = inputs.shape[0]
+        cum_len = [0]
+        for s, e in zip(starts, ends):
+            boundary = min(cum_len[-1] + (e - s), max_len)
+            if boundary != cum_len[-1]:
+                cum_len.append(boundary)
+        cu_seqlens = torch.tensor(
+            cum_len,
+            dtype=torch.int32,
+            pin_memory=torch.cuda.is_available(),
+        )
+
+        # Add batch dim for model compatibility. GPU transfer is handled by
+        # the trainer so that pin_memory + non_blocking works with workers.
+        return inputs.unsqueeze(0), targets.unsqueeze(0), cu_seqlens
+
+    def _read_fixed(self, shard, pos):
+        """Returns (inputs [B, S], targets [B, S]) on CPU."""
+        chunk_len = self.cfg.batch_size * (self.cfg.seq_len + 1)
+        buf = _read_tokens_slice(shard, pos, pos + chunk_len)
+        buf = buf.view(self.cfg.batch_size, self.cfg.seq_len + 1)
+        return buf[:, :-1], buf[:, 1:]
+
+    def __iter__(self) -> Iterator[Tuple[torch.Tensor, ...]]:
         if self.cfg.mode == "varlen_packed":
-            yield from self._iter_varlen()
+            plans, read = self._plan_varlen(), self._read_varlen
         elif self.cfg.mode == "fixed_batch":
-            yield from self._iter_fixed()
+            plans, read = self._plan_fixed(), self._read_fixed
         else:
             raise ValueError(f"Unknown mode: {self.cfg.mode}")
+
+        consumer, n_consumers, skip = self._consumer()
+        for global_idx, plan in enumerate(plans):
+            if global_idx % n_consumers != consumer:
+                continue
+            if skip > 0:
+                skip -= 1
+                continue
+            if self._should_stop():
+                return
+            batch = read(*plan)
+            self._batch_count += 1
+            self._token_count += batch[0].numel()
+            yield batch
 
 
 # =============================================================================

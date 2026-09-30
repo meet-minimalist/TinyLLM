@@ -15,7 +15,7 @@ num_workers: 4              # Windows: 0 | WSL2/Linux: 4
 prefetch_factor: 2          # only active when num_workers > 0
 prefetch_queue_size: 2      # thread-based prefetch (Windows only, skipped when num_workers > 0)
 
-packed_tokens: 2048  # 2048 tokens/step × 4 grad accum = 8192 tokens/optimizer update
+packed_tokens: 2048  # 2048 tokens/micro-batch × 4 grad accum = 8192 tokens per optimizer step (x world_size)
 # max_seq_len is defined by the model config (position-embedding capacity).
 # Uncomment ONLY to train on shorter documents than the model supports
 # (value must be <= the model's max_seq_len).
@@ -36,8 +36,16 @@ num_epochs: 1
 # Target: ~2B tokens (2× Chinchilla-optimal for 50M params; slight overtraining improves generalization)
 # 2B tokens / 2048 tokens per step = ~976K steps → round to 1M
 num_training_steps: 1_000_000
-lr_scheduler_type: "cosine"
+lr_scheduler_type: "cosine"   # also: "wsd", "power" (see lr_schedule below)
 warmup_steps: 0.05  # 5% of num_training_steps = 50K steps
+# Only read by "wsd" and "power". Step values in (0, 1) are fractions of
+# num_training_steps.
+lr_schedule:
+  decay_steps: 0.2        # final decay length (wsd and power)
+  decay_shape: "linear"   # wsd only: "linear" | "cosine" | "sqrt"
+  min_lr_ratio: 0.0       # decay floor, as a fraction of the peak LR
+  power_start_step: 0.1   # power only: where the s^-exponent decay begins
+  exponent: 0.51          # power only (Rigel / IBM Power scheduler value)
 
 # Chinchilla-optimal token budget (Hoffmann et al. 2022): D ≈ tokens_per_param × N.
 # The derived step count is ALWAYS logged at startup as an estimate. Set
@@ -51,14 +59,29 @@ label_smoothing: 0.0    # >0 to enable label smoothing (not compatible with CCE 
 use_grad_accum: true
 iters_to_accumulate: 4
 
-precision: "bf16"       # "bf16" (default) | "fp16" | "fp32"
+precision: "auto"       # "auto" (bf16 on Ampere+, fp16 on T4/V100) | "bf16" | "fp16" | "fp32"
 use_compile: true
 
 log_every: 10
 max_grad_norm: 1.0
 save_every_steps: 10000   # ~100 checkpoints over 1M steps
 use_wandb: true
-resume_wandb_id: null
+resume_wandb_id: null   # set automatically and stored in checkpoints
+
+# --- Resume / free-tier sessions ------------------------------------------
+# run_name makes the run folder stable (<output_dir>/<exp>/<run_name>), which
+# resume: auto needs. Also settable with --run_name on the command line.
+# run_name: "qwen3_50m_a"
+resume: "auto"            # "auto" | "none" | path/to/step_XXXXXXXX.pt
+# init_from: path/to/ckpt.pt   # weights only, for a new stage (mid-train / SFT)
+save_every_minutes: 30    # timer-based save, in addition to save_every_steps
+max_runtime_minutes: 0    # >0: save and exit before a hard limit (Kaggle 12 h -> 690)
+eval_every_steps: 0       # >0: periodic validation loss
+eval_max_batches: 200     # per rank; 0 = the full validation set
+checkpoint:
+  keep_last: 3
+  keep_every_steps: 0     # >0: also keep every Nth step forever (WSD decay branches)
+  hub_repo_id: null       # e.g. "your-user/tinyllm-ckpts" (private); needs HF_TOKEN
 
 analysis:
   every_n_steps: 2000    # ~500 analysis snapshots over 1M steps

@@ -52,7 +52,18 @@ def lr_scheduler_factory(
     optimizer,
     num_training_steps: int,
     num_warmup_steps: int = 0,
+    sched_cfg: dict | None = None,
 ):
+    if scheduler_name in ("wsd", "power"):
+        from src.tinyllm.utils.lr_schedules import build_lambda_schedule
+
+        return build_lambda_schedule(
+            scheduler_name,
+            optimizer,
+            num_training_steps=num_training_steps,
+            num_warmup_steps=num_warmup_steps,
+            sched_cfg=sched_cfg or {},
+        )
     if scheduler_name == "cosine":
         from transformers.optimization import get_cosine_schedule_with_warmup
 
@@ -88,5 +99,6 @@ def lr_scheduler_factory(
     else:
         raise ValueError(
             f"Unknown scheduler: {scheduler_name}. "
-            f"Supported: cosine, linear, constant, constant_warmup, inverse_sqrt"
+            f"Supported: cosine, linear, constant, constant_warmup, "
+            f"inverse_sqrt, wsd, power"
         )

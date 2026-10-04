@@ -21,7 +21,7 @@ Architecture experiments now branch from `arch/base` (a copy of `main` at `ecc6c
 | Data | One global batch order; rank/worker `c` takes batches `c, c+n, ...`; resume skips consumed batches without reading their tokens. |
 | DDP | `torchrun` works; `no_sync` during accumulation; stop/exhaust/save decisions are OR-ed over ranks so no rank waits forever; NaN steps are skipped on all ranks together via the (global) grad norm. |
 | Precision | `precision: auto` → bf16 on Ampere+, fp16 on T4/V100/P100. |
-| LR | `wsd` and `power` (Rigel's) schedules. |
+| LR | `wsd` (from transformers) and `power` (Rigel's; transformers has none) schedules. |
 | Accounting | Total / embedding / active params, FLOPs per token, tokens/s and MFU in the log. |
 
 **Bugs found on the way**

@@ -246,7 +246,7 @@ kernels:
 - **Free-tier sessions**: `max_runtime_minutes` saves and exits before a hard limit (e.g. `690` for Kaggle's 12 h); `save_every_minutes` saves on a timer; SIGTERM also saves. `checkpoint.hub_repo_id` pushes the newest checkpoint to a private HF repo and pulls it back when the local disk is empty (needs `huggingface_hub` and `HF_TOKEN`).
 - **DDP**: `torchrun --nproc_per_node=N`. Each rank reads a disjoint slice of one global batch order; only rank 0 logs, benchmarks and saves.
 - **Precision**: `precision: auto` picks bf16 on Ampere+ and fp16 + GradScaler on T4/V100/P100.
-- **LR schedules**: `cosine`, `linear`, `constant`, `constant_warmup`, `inverse_sqrt`, plus `wsd` (warmup–stable–decay) and `power` (IBM Power scheduler, used by Rigel), both configured under `lr_schedule:`.
+- **LR schedules**: `cosine`, `linear`, `constant`, `constant_warmup`, `inverse_sqrt`, plus `wsd` (warmup–stable–decay, `transformers.get_wsd_schedule`) and `power` (IBM Power scheduler, used by Rigel; `utils/lr_schedules.py`, since transformers has none), both configured under `lr_schedule:`.
 - **Accounting**: startup logs total / embedding / active params and FLOPs per token; training logs tokens/s and MFU.
 
 ### Chinchilla token budget

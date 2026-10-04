@@ -54,15 +54,41 @@ def lr_scheduler_factory(
     num_warmup_steps: int = 0,
     sched_cfg: dict | None = None,
 ):
-    if scheduler_name in ("wsd", "power"):
-        from src.tinyllm.utils.lr_schedules import build_lambda_schedule
+    sched_cfg = sched_cfg or {}
 
-        return build_lambda_schedule(
-            scheduler_name,
+    def _steps(value) -> int:
+        """A float in (0, 1) is a fraction of num_training_steps."""
+        if isinstance(value, float) and 0 < value < 1:
+            return int(value * num_training_steps)
+        return int(value)
+
+    num_decay_steps = _steps(sched_cfg.get("decay_steps", 0.2))
+    min_lr_ratio = float(sched_cfg.get("min_lr_ratio", 0.0))
+
+    if scheduler_name == "wsd":
+        from transformers.optimization import get_wsd_schedule
+
+        return get_wsd_schedule(
             optimizer,
-            num_training_steps=num_training_steps,
             num_warmup_steps=num_warmup_steps,
-            sched_cfg=sched_cfg or {},
+            num_decay_steps=num_decay_steps,
+            num_training_steps=num_training_steps,
+            decay_type=sched_cfg.get("decay_type", "linear"),
+            min_lr_ratio=min_lr_ratio,
+        )
+    if scheduler_name == "power":
+        from src.tinyllm.utils.lr_schedules import get_power_schedule
+
+        return get_power_schedule(
+            optimizer,
+            num_warmup_steps=num_warmup_steps,
+            num_training_steps=num_training_steps,
+            power_start_step=_steps(
+                sched_cfg.get("power_start_step", num_warmup_steps)
+            ),
+            exponent=float(sched_cfg.get("exponent", 0.51)),
+            num_decay_steps=num_decay_steps,
+            min_lr_ratio=min_lr_ratio,
         )
     if scheduler_name == "cosine":
         from transformers.optimization import get_cosine_schedule_with_warmup

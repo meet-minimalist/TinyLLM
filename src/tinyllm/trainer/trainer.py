@@ -1,4 +1,5 @@
 import contextlib
+import enum
 import math
 import signal
 import time
@@ -22,6 +23,14 @@ IGNORE_INDEX = -100
 
 # Consecutive non-finite steps tolerated before the run is aborted.
 MAX_CONSECUTIVE_NONFINITE = 20
+
+
+class EpochEnd(enum.Enum):
+    """Why ``Trainer._train_epoch`` returned."""
+
+    DATA_EXHAUSTED = enum.auto()  # the loader ran out: a normal epoch end
+    MAX_STEPS = enum.auto()  # num_training_steps reached
+    STOP_REQUESTED = enum.auto()  # time limit or SIGTERM: save and exit
 
 
 class Trainer:
@@ -279,10 +288,10 @@ class Trainer:
         stopped_early = False
         while self.epoch < self.num_epochs:
             outcome = self._train_epoch()
-            if outcome == "stop":
+            if outcome is EpochEnd.STOP_REQUESTED:
                 stopped_early = True
                 break
-            if outcome == "max_steps":
+            if outcome is EpochEnd.MAX_STEPS:
                 break
             # Data exhausted: end of epoch.
             self._end_epoch()
@@ -305,14 +314,14 @@ class Trainer:
             self.ckpt_manager.wait()
         self.callback_handler.on_train_end()
 
-    def _train_epoch(self) -> str:
-        """Returns "exhausted", "max_steps" or "stop"."""
+    def _train_epoch(self) -> EpochEnd:
+        """Train until the data, the step budget or the session runs out."""
         self.model.train()
         data_iter = iter(self.make_train_loader(self.batches_in_epoch))
         while True:
             if self.max_steps and self.step >= self.max_steps:
                 logger.info(f"Reached {self.max_steps:,} steps.")
-                return "max_steps"
+                return EpochEnd.MAX_STEPS
 
             batches = []
             for _ in range(self.iters_to_accumulate):
@@ -334,9 +343,9 @@ class Trainer:
             if exhausted:
                 # A partial accumulation window at the end of the data is
                 # dropped, so every step has the same token count.
-                return "exhausted"
+                return EpochEnd.DATA_EXHAUSTED
             if stop:
-                return "stop"
+                return EpochEnd.STOP_REQUESTED
 
             self._train_step(batches)
 

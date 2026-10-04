@@ -42,7 +42,7 @@ warmup_steps: 0.05  # 5% of num_training_steps = 50K steps
 # num_training_steps.
 lr_schedule:
   decay_steps: 0.2        # final decay length (wsd and power)
-  decay_shape: "linear"   # wsd only: "linear" | "cosine" | "sqrt"
+  decay_type: "linear"    # wsd only: "linear" | "cosine" | "1-sqrt" (transformers get_wsd_schedule)
   min_lr_ratio: 0.0       # decay floor, as a fraction of the peak LR
   power_start_step: 0.1   # power only: where the s^-exponent decay begins
   exponent: 0.51          # power only (Rigel / IBM Power scheduler value)

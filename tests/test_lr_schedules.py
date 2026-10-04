@@ -3,24 +3,29 @@ import math
 import pytest
 import torch
 
-from src.tinyllm.utils.lr_schedules import build_lambda_schedule, power_lambda, wsd_lambda
+from src.tinyllm.factory.factory import lr_scheduler_factory
+from src.tinyllm.utils.lr_schedules import power_lambda
 
 
-def test_wsd_shape():
-    fn = wsd_lambda(100, num_warmup_steps=10, decay_steps=20)
-    assert fn(0) == pytest.approx(0.1)
-    assert fn(9) == pytest.approx(1.0)
-    assert fn(50) == 1.0
-    assert fn(79) == 1.0
-    assert fn(80) == pytest.approx(1.0)
-    assert fn(90) == pytest.approx(0.5)
-    assert fn(100) == pytest.approx(0.0)
+def _lrs(name, steps, warmup, cfg):
+    p = torch.nn.Parameter(torch.zeros(1))
+    opt = torch.optim.SGD([p], lr=1.0)
+    sched = lr_scheduler_factory(name, opt, steps, warmup, cfg)
+    out = []
+    for _ in range(steps + 1):
+        out.append(opt.param_groups[0]["lr"])
+        opt.step()
+        sched.step()
+    return out
 
 
-def test_wsd_min_ratio_and_cosine():
-    fn = wsd_lambda(100, 0, 20, decay_shape="cosine", min_lr_ratio=0.1)
-    assert fn(90) == pytest.approx(0.1 + 0.9 * 0.5)
-    assert fn(100) == pytest.approx(0.1)
+def test_wsd_from_factory_shape():
+    # transformers' get_wsd_schedule; fractions resolve against num_training_steps.
+    lr = _lrs("wsd", 100, 10, {"decay_steps": 0.2, "decay_type": "linear"})
+    assert lr[5] == pytest.approx(0.5)
+    assert lr[50] == 1.0 and lr[79] == 1.0
+    assert lr[90] == pytest.approx(0.5)
+    assert lr[100] == pytest.approx(0.0)
 
 
 def test_power_matches_rigel_form():
@@ -46,7 +51,7 @@ def test_schedule_state_resumes(name):
     def make():
         p = torch.nn.Parameter(torch.zeros(1))
         opt = torch.optim.SGD([p], lr=1.0)
-        return opt, build_lambda_schedule(name, opt, 100, 10, {"decay_steps": 0.2})
+        return opt, lr_scheduler_factory(name, opt, 100, 10, {"decay_steps": 0.2})
 
     opt, sched = make()
     for _ in range(37):

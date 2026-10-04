@@ -67,3 +67,18 @@ def test_schedule_state_resumes(name):
         opt2.step()
         sched2.step()
         assert math.isclose(opt.param_groups[0]["lr"], opt2.param_groups[0]["lr"])
+
+
+@pytest.mark.parametrize(
+    "name", ["cosine", "linear", "constant", "constant_warmup", "inverse_sqrt", "wsd", "power"]
+)
+def test_every_schedule_is_registered(name):
+    p = torch.nn.Parameter(torch.zeros(1))
+    sched = lr_scheduler_factory(name, torch.optim.SGD([p], lr=1.0), 100, 10, {})
+    assert hasattr(sched, "state_dict")
+
+
+def test_unknown_schedule_raises():
+    p = torch.nn.Parameter(torch.zeros(1))
+    with pytest.raises(KeyError):
+        lr_scheduler_factory("nope", torch.optim.SGD([p], lr=1.0), 100, 10, {})

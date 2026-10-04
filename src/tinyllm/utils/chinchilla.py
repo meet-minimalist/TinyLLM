@@ -18,21 +18,28 @@ import math
 DEFAULT_TOKENS_PER_PARAM = 20.0
 
 
-def tokens_per_step(train_config) -> int:
-    """Tokens processed per training step (one micro-batch).
+def tokens_per_step(train_config, world_size: int = 1) -> int:
+    """Tokens per optimizer step, summed over all ranks.
 
-    global_step increments once per micro-batch, and num_training_steps is
-    compared against it, so a "step" is one batch regardless of grad accumulation.
+    One step = ``iters_to_accumulate`` micro-batches on each of ``world_size``
+    ranks, and num_training_steps counts these optimizer steps.
     """
     mode = train_config.get("mode", "varlen_packed")
     if mode == "varlen_packed":
-        return int(train_config.get("packed_tokens", 8192))
-    # fixed_batch mode: batch_size × sequence length
-    batch_size = int(train_config.get("batch_size", 1))
-    seq_len = int(
-        train_config.get("seq_len", train_config.get("max_seq_len", 2048))
+        micro = int(train_config.get("packed_tokens", 8192))
+    else:
+        # fixed_batch mode: batch_size × sequence length
+        batch_size = int(train_config.get("batch_size", 1))
+        seq_len = int(
+            train_config.get("seq_len", train_config.get("max_seq_len", 2048))
+        )
+        micro = batch_size * seq_len
+    accum = (
+        int(train_config.get("iters_to_accumulate", 1))
+        if train_config.get("use_grad_accum", False)
+        else 1
     )
-    return batch_size * seq_len
+    return micro * accum * world_size
 
 
 def chinchilla_token_budget(

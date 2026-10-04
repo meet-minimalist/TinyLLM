@@ -25,3 +25,6 @@ class BaseCallback(ABC):
 
     def on_train_step_end(self, **kwargs):
         pass
+
+    def on_evaluate(self, **kwargs):
+        pass

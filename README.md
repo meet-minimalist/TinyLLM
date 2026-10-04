@@ -14,7 +14,17 @@ python -m src.tinyllm.train \
 python -m src.tinyllm.train \
     -c src/tinyllm/configs/training/train_config.yaml \
     -m src/tinyllm/configs/models/qwen3.yaml
+
+# Same run on 8 GPUs of one node (DDP)
+torchrun --nproc_per_node=8 -m src.tinyllm.train \
+    -c src/tinyllm/configs/training/train_config.yaml \
+    -m src/tinyllm/configs/models/qwen3.yaml --run_name qwen3_a
+
+# Resume: run the same command again with the same --run_name
 ```
+
+See [docs/END_TO_END_PLAN.md](docs/END_TO_END_PLAN.md) for the pretraining →
+mid-training → post-training roadmap.
 
 ## Installation
 
@@ -228,8 +238,19 @@ kernels:
 - **AdamW**: all 1D / bias / norm / embedding parameters
 - `_CombinedOptimizer` wraps both as a single `torch.optim.Optimizer` (compatible with LR schedulers)
 
+### Resumable, multi-GPU training
+- **One step = one optimizer update** = `packed_tokens × iters_to_accumulate × world_size` tokens. `num_training_steps`, the LR schedule, logging and checkpoints all count optimizer steps.
+- **Full checkpoints** (`<output_dir>/<exp>/<run_name>/checkpoints/step_*.pt`): model, optimizer, LR scheduler, GradScaler, counters, data position and RNG. A resumed run is bit-identical to an uninterrupted one (tested).
+- `resume: auto` (default) continues from the newest checkpoint of the run named by `run_name` / `--run_name`. `resume: <path>` loads a given file; `resume: none` starts fresh.
+- `init_from: <ckpt>` loads weights only (fresh optimizer/schedule/data) — for a new stage such as mid-training or SFT.
+- **Free-tier sessions**: `max_runtime_minutes` saves and exits before a hard limit (e.g. `690` for Kaggle's 12 h); `save_every_minutes` saves on a timer; SIGTERM also saves. `checkpoint.hub_repo_id` pushes the newest checkpoint to a private HF repo and pulls it back when the local disk is empty (needs `huggingface_hub` and `HF_TOKEN`).
+- **DDP**: `torchrun --nproc_per_node=N`. Each rank reads a disjoint slice of one global batch order; only rank 0 logs, benchmarks and saves.
+- **Precision**: `precision: auto` picks bf16 on Ampere+ and fp16 + GradScaler on T4/V100/P100.
+- **LR schedules**: `cosine`, `linear`, `constant`, `constant_warmup`, `inverse_sqrt`, plus `wsd` (warmup–stable–decay, `transformers.get_wsd_schedule`) and `power` (IBM Power scheduler, used by Rigel; `utils/lr_schedules.py`, since transformers has none), both configured under `lr_schedule:`.
+- **Accounting**: startup logs total / embedding / active params and FLOPs per token; training logs tokens/s and MFU.
+
 ### Chinchilla token budget
-- At startup, logs the Chinchilla-optimal step count (Hoffmann et al. 2022): `D ≈ tokens_per_param × N`, converted to steps via `tokens_per_step` (= `packed_tokens`). This estimates how long to train / when training stops.
+- At startup, logs the Chinchilla-optimal step count (Hoffmann et al. 2022): `D ≈ tokens_per_param × N`, converted to optimizer steps via tokens per step. This estimates how long to train / when training stops.
 - Set `chinchilla.enabled: true` in the training config to make it drive `num_training_steps` automatically (overriding the manual value); `tokens_per_param: 20` is compute-optimal, `40` ≈ 2× (mild overtraining).
 - Example: a ~50M model at 2048 tokens/step → ~487K steps (20×) or ~975K (40×).
 
@@ -257,6 +278,10 @@ kernels:
 ### Testing
 
 ```bash
+# Unit / integration tests (CPU, synthetic shards): data resume + rank
+# sharding, LR schedules, bit-exact stop/resume, 2-rank DDP == grad accum
+python -m pytest tests -q
+
 # Quick smoke test on random data (no download needed)
 python -m src.tinyllm.test_run
 

@@ -220,3 +220,8 @@ class _CombinedOptimizer(torch.optim.Optimizer):
     def load_state_dict(self, state_dict):
         self.muon.load_state_dict(state_dict["muon"])
         self.adamw.load_state_dict(state_dict["adamw"])
+        # Optimizer.load_state_dict replaces each inner param_groups list with
+        # NEW dicts. Re-point ours at them; otherwise the LR scheduler keeps
+        # writing into the old, orphaned dicts and every resumed run trains at
+        # the LR frozen in the checkpoint.
+        self.param_groups = self.muon.param_groups + self.adamw.param_groups

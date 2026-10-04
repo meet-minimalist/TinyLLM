@@ -1,6 +1,6 @@
 from box import Box
 
-from src.tinyllm.factory.registry import MODEL_REGISTRY
+from src.tinyllm.factory.registry import LR_SCHEDULER_REGISTRY, MODEL_REGISTRY
 from src.tinyllm.logger.logger_utils import logger
 
 
@@ -52,41 +52,14 @@ def lr_scheduler_factory(
     optimizer,
     num_training_steps: int,
     num_warmup_steps: int = 0,
+    sched_cfg: dict | None = None,
 ):
-    if scheduler_name == "cosine":
-        from transformers.optimization import get_cosine_schedule_with_warmup
+    """Build the LR schedule registered as ``scheduler_name``.
 
-        return get_cosine_schedule_with_warmup(
-            optimizer,
-            num_warmup_steps=num_warmup_steps,
-            num_training_steps=num_training_steps,
-        )
-    elif scheduler_name == "linear":
-        from transformers.optimization import get_linear_schedule_with_warmup
+    Schedules live in ``utils/lr_schedules.py``; importing it registers them.
+    """
+    import src.tinyllm.utils.lr_schedules  # noqa: F401  (registers schedules)
 
-        return get_linear_schedule_with_warmup(
-            optimizer,
-            num_warmup_steps=num_warmup_steps,
-            num_training_steps=num_training_steps,
-        )
-    elif scheduler_name == "constant":
-        from transformers.optimization import get_constant_schedule
-
-        return get_constant_schedule(optimizer)
-    elif scheduler_name == "constant_warmup":
-        from transformers.optimization import get_constant_schedule_with_warmup
-
-        return get_constant_schedule_with_warmup(
-            optimizer, num_warmup_steps=num_warmup_steps
-        )
-    elif scheduler_name == "inverse_sqrt":
-        from transformers.optimization import get_inverse_sqrt_schedule
-
-        return get_inverse_sqrt_schedule(
-            optimizer, num_warmup_steps=num_warmup_steps
-        )
-    else:
-        raise ValueError(
-            f"Unknown scheduler: {scheduler_name}. "
-            f"Supported: cosine, linear, constant, constant_warmup, inverse_sqrt"
-        )
+    return LR_SCHEDULER_REGISTRY.get(scheduler_name)(
+        optimizer, num_training_steps, num_warmup_steps, sched_cfg or {}
+    )

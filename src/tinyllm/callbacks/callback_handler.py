@@ -32,3 +32,7 @@ class CallbackHandler:
     def on_train_step_end(self, **kwargs):
         for cb in self.callbacks:
             cb.on_train_step_end(**kwargs)
+
+    def on_evaluate(self, **kwargs):
+        for cb in self.callbacks:
+            cb.on_evaluate(**kwargs)

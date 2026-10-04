@@ -41,22 +41,23 @@ def get_tokenizer(tokenizer_name: str):
     return tokenizer
 
 
-def get_exp_path(base_dir: str) -> str:
-    """Function to get the directory to same the experiment related data.
+def get_exp_path(
+    base_dir: str, run_name: str | None = None, create: bool = True
+) -> tuple[str, str]:
+    """Return (run directory, log file path) for an experiment.
 
     Args:
-        base_dir (str): Directory to store all experiments.
-
-    Returns:
-        str: Path for current experiment.
+        base_dir (str): Directory that holds all runs of this experiment.
+        run_name (str | None): Stable run folder name. Resuming a run needs
+            the same folder on every launch; without a name each launch gets a
+            fresh timestamped folder.
+        create (bool): Create the folder (only the main rank should).
     """
-    start_time = datetime.datetime.now()
-    time_stamp = start_time.strftime("%Y_%m_%d_%H_%M_%S")
-    if base_dir is None:
-        base_exp_path = f"./exp/{time_stamp}"
-    else:
-        base_exp_path = os.path.join(base_dir, time_stamp)
-    os.makedirs(base_exp_path, exist_ok=True)
+    if run_name is None:
+        run_name = datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
+    base_exp_path = os.path.join(base_dir or "./exp", run_name)
+    if create:
+        os.makedirs(base_exp_path, exist_ok=True)
     log_file = os.path.join(base_exp_path, "log.txt")
     return base_exp_path, log_file
 

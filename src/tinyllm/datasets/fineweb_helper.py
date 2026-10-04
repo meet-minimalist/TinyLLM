@@ -1,8 +1,7 @@
 import queue
 import torch
-import numpy as np
 from pathlib import Path
-from typing import Iterator, Tuple, Optional, Union
+from typing import Iterator, Optional, Tuple
 import glob
 import os
 import threading
@@ -46,6 +45,11 @@ class DataLoaderConfig:
     prefetch_factor: int = 2
     prefetch_queue_size: int = 2  # background thread queue depth (0 = disabled)
 
+    # Data parallelism + resume
+    rank: int = 0
+    world_size: int = 1
+    skip_batches: int = 0  # batches this rank already consumed (resume)
+
 
 # =============================================================================
 # Low-level I/O Utilities
@@ -87,50 +91,22 @@ def _read_tokens_slice(
     return tokens
 
 
-# =============================================================================
-# Async BOS Scanner (Varlen mode only)
-# =============================================================================
-class BOSScanner:
-    def __init__(
-        self, shard: dict, bos_token: int, chunk_size: int = 6_000_000
-    ):
-        self.shard = shard
-        self.bos_token = bos_token
-        self.chunk_size = chunk_size
-        self._bos_idx: Optional[np.ndarray] = None
-        self._done = threading.Event()
-        self._thread = threading.Thread(target=self._scan, daemon=True)
-        self._thread.start()
+def _first_separator(shard: dict, bos_token: int) -> Optional[int]:
+    """Position of the first document separator in a shard, or None.
 
-    def _scan(self):
-        file = self.shard["path"]
-        num_tokens = self.shard["num_tokens"]
-        positions = []
-
-        with file.open("rb", buffering=0) as f:
-            f.seek(HEADER_SIZE * 4)
-            for start in range(0, num_tokens, self.chunk_size):
-                length = min(self.chunk_size, num_tokens - start)
-                chunk = torch.empty(length, dtype=torch.uint16)
-                f.readinto(chunk.numpy())
-                bos = (
-                    (chunk == self.bos_token).nonzero(as_tuple=True)[0].numpy()
-                )
-                positions.append(bos + start)
-
-        self._bos_idx = (
-            np.concatenate(positions)
-            if positions
-            else np.array([], dtype=np.int64)
-        )
-        self._done.set()
-
-    def wait_ready(self):
-        self._done.wait()
-
-    def get_indices(self) -> np.ndarray:
-        self.wait_ready()
-        return self._bos_idx
+    A shard can start in the middle of a document (the tail of the previous
+    shard's last document); those tokens are skipped. Documents are short, so
+    this reads only a few KB: the window doubles until a separator is found.
+    """
+    total = shard["num_tokens"]
+    start, window = 0, 4096
+    while start < total:
+        end = min(total, start + window)
+        hits = (_read_tokens_slice(shard, start, end) == bos_token).nonzero()
+        if len(hits):
+            return start + int(hits[0])
+        start, window = end, window * 2
+    return None
 
 
 # =============================================================================
@@ -140,6 +116,16 @@ class NanoGPTDataset(IterableDataset):
     """
     Memory-efficient dataloader supporting both varlen-packed and fixed-batch modes.
     Switch modes by changing DataLoaderConfig.mode
+
+    Batches form one fixed global sequence over all shards, numbered 0, 1, 2,
+    ... Every batch is a fixed-size run of consecutive tokens, so where batch
+    ``g`` lives (file and offset) is arithmetic on the shard sizes — no shard
+    needs to be scanned. In varlen mode the document boundaries a batch needs
+    (for ``cu_seqlens``) are found in that batch's own tokens after reading it.
+
+    Each consumer (one DataLoader worker on one rank) takes every
+    ``n_consumers``-th batch, so ranks and workers never see the same data, and
+    resume jumps straight to the next unread batch.
     """
 
     def __init__(self, cfg: DataLoaderConfig):
@@ -164,140 +150,115 @@ class NanoGPTDataset(IterableDataset):
             return True
         return False
 
-    def _worker_files(self):
-        """Return the file subset this worker is responsible for."""
+    def _consumer(self) -> Tuple[int, int, int]:
+        """Return (consumer_id, n_consumers, batches_to_skip) for this worker.
+
+        The DataLoader takes batches from its workers round-robin, starting at
+        worker 0. So if this rank already delivered ``skip_batches`` batches,
+        worker ``w`` produced ``ceil((skip_batches - w) / W)`` of them.
+        """
         info = torch.utils.data.get_worker_info()
-        if info is None:
-            return self._files  # single-process: all files
-        # Shard files across workers so each worker reads a disjoint subset
-        return self._files[info.id :: info.num_workers]
+        w, W = (0, 1) if info is None else (info.id, info.num_workers)
+        cfg = self.cfg
+        consumer = cfg.rank * W + w
+        n_consumers = cfg.world_size * W
+        skip = max(0, -(-(cfg.skip_batches - w) // W))
+        return consumer, n_consumers, skip
 
-    def _iter_varlen(
-        self,
-    ) -> Iterator[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
-        """Yields: (inputs [N], targets [N], cu_seqlens [M+1]) on CPU."""
-        for file_path in self._worker_files():
-            if self._should_stop():
-                return
-            shard = _load_data_shard_lazy(file_path)
-            scanner = BOSScanner(shard, self.cfg.bos_token)
-            bos_idx = scanner.get_indices()
-            if len(bos_idx) == 0:
-                continue
+    # --- Batch layout: arithmetic only ----------------------------------------
+    def _layout(self) -> Iterator[Tuple[dict, int, int, int, int]]:
+        """Yields (shard, first, stride, span, n_batches) per file.
 
-            idx = 0
-            n = len(bos_idx)
-            total = shard["num_tokens"]
-            target_len = self.cfg.packed_tokens + 1  # +1 for input/target shift
-            # Offset to resume a partly-consumed document from. None means the
-            # next document starts at its own BOS. This carries across batches,
-            # so a document longer than one batch spans several of them.
-            doc_pos = None
-
-            while idx < n:
-                starts, ends = [], []
-                cur_len = 0
-
-                while cur_len < target_len and idx < n:
-                    start = bos_idx[idx] if doc_pos is None else doc_pos
-                    next_bos = bos_idx[idx + 1] if idx + 1 < n else total
-
-                    # Clamp by: next doc, max_seq_len, or remaining batch space
-                    end = min(
-                        next_bos,
-                        start + self.cfg.max_seq_len,
-                        start + target_len - cur_len,
-                    )
-                    starts.append(start)
-                    ends.append(end)
-                    cur_len += end - start
-
-                    # Only move to the next document once this one is fully
-                    # consumed. Advancing unconditionally discarded whatever
-                    # the two length clamps cut off, which threw away ~17% of
-                    # the corpus — every document longer than max_seq_len lost
-                    # its tail, and so did the last document of every batch.
-                    if end >= next_bos:
-                        idx += 1
-                        doc_pos = None
-                    else:
-                        doc_pos = end
-
-                if cur_len < 2:
-                    continue  # need at least input+target
-
-                # Read & concatenate segments
-                segments = [
-                    _read_tokens_slice(shard, s, e)
-                    for s, e in zip(starts, ends)
-                ]
-                buf = torch.cat(segments)
-
-                # Shift for targets
-                inputs = buf[:-1]
-                targets = buf[1:]
-
-                # Build cu_seqlens (reflects buf length = packed_tokens+1).
-                # Clamp to input length (inputs = buf[:-1], removing the +1
-                # shift token). That clamp pulls the final boundary down by
-                # one, so a last segment of length 1 collapses to length 0 and
-                # leaves a duplicated boundary (~1 batch in 500).
-                # flash_attn_varlen_func treats a zero-length segment as
-                # undefined behaviour, so drop duplicates here — before the
-                # tensor is built, to keep it pinned in one allocation.
-                max_len = inputs.shape[0]
-                cum_len = [0]
-                for s, e in zip(starts, ends):
-                    boundary = min(cum_len[-1] + (e - s), max_len)
-                    if boundary != cum_len[-1]:
-                        cum_len.append(boundary)
-                cu_seqlens = torch.tensor(
-                    cum_len, dtype=torch.int32, pin_memory=True
-                )
-
-                # Add batch dim for model compatibility
-                inputs = inputs.unsqueeze(0)
-                targets = targets.unsqueeze(0)
-
-                # Yield CPU tensors — GPU transfer is handled by the trainer
-                # so that pin_memory + non_blocking works correctly with workers.
-                self._batch_count += 1
-                self._token_count += inputs.shape[-1]
-                yield inputs, targets, cu_seqlens
-                if self._should_stop():
-                    return
-
-    def _iter_fixed(self) -> Iterator[Tuple[torch.Tensor, torch.Tensor]]:
-        """Yields: (inputs [B, S], targets [B, S]) on CPU."""
-        for file_path in self._worker_files():
-            if self._should_stop():
-                return
+        Batch ``i`` of a file covers tokens ``[first + i*stride, +span)``,
+        clipped to the file. Computed lazily, file by file.
+        """
+        cfg = self.cfg
+        for file_path in self._files:
             shard = _load_data_shard_lazy(file_path)
             total = shard["num_tokens"]
-            chunk_len = self.cfg.batch_size * (self.cfg.seq_len + 1)
-            pos = 0
+            if cfg.mode == "varlen_packed":
+                first = _first_separator(shard, cfg.bos_token)
+                if first is None:
+                    continue
+                # packed_tokens inputs + 1 for the target shift. Batches do
+                # not overlap: the shift token is a target only.
+                span = stride = cfg.packed_tokens + 1
+                remaining = total - first
+                n = -(-remaining // stride)
+                if remaining % stride == 1:
+                    n -= 1  # a 1-token tail has no input/target pair
+            else:
+                first, stride = 0, cfg.batch_size * cfg.seq_len
+                span = cfg.batch_size * (cfg.seq_len + 1)
+                n = (total - span) // stride + 1 if total >= span else 0
+            if n > 0:
+                yield shard, first, stride, span, n
 
-            while pos + chunk_len <= total:
-                if self._should_stop():
-                    return
-                buf = _read_tokens_slice(shard, pos, pos + chunk_len)
-                buf = buf.view(self.cfg.batch_size, self.cfg.seq_len + 1)
+    # --- Materialise one batch ------------------------------------------------
+    def _read_varlen(self, shard, start, end):
+        """Returns (inputs [1, N], targets [1, N], cu_seqlens [M+1]) on CPU."""
+        buf = _read_tokens_slice(shard, start, end)
+        inputs, targets = buf[:-1], buf[1:]
+        n_in = inputs.shape[0]
 
-                inputs = buf[:, :-1]
-                targets = buf[:, 1:]
-                pos += self.cfg.batch_size * self.cfg.seq_len
+        # Segments: a new one starts at every separator (document start) and
+        # every max_seq_len tokens inside a document piece. The first piece may
+        # continue a document from the previous batch.
+        doc_starts = (buf == self.cfg.bos_token).nonzero().flatten().tolist()
+        piece_starts = [0] + [i for i in doc_starts if i > 0]
+        bounds = []
+        for s, e in zip(piece_starts, piece_starts[1:] + [buf.shape[0]]):
+            bounds.extend(range(s, e, self.cfg.max_seq_len))
+        bounds.append(buf.shape[0])
 
-                self._batch_count += 1
-                self._token_count += inputs.numel()
-                yield inputs, targets
+        # Clamp to the input length (inputs drop the +1 shift token). That can
+        # collapse a 1-token last segment to length 0 — a duplicated boundary,
+        # which flash_attn_varlen_func treats as undefined behaviour — so drop
+        # duplicates before building the (pinned) tensor.
+        cum_len = [0]
+        for b in bounds[1:]:
+            b = min(b, n_in)
+            if b != cum_len[-1]:
+                cum_len.append(b)
+        cu_seqlens = torch.tensor(
+            cum_len,
+            dtype=torch.int32,
+            pin_memory=torch.cuda.is_available(),
+        )
+        # Add batch dim for model compatibility. GPU transfer is handled by
+        # the trainer so that pin_memory + non_blocking works with workers.
+        return inputs.unsqueeze(0), targets.unsqueeze(0), cu_seqlens
 
-    def __iter__(self) -> Iterator[Union[Tuple, Tuple]]:
-        if self.cfg.mode == "varlen_packed":
-            yield from self._iter_varlen()
-        elif self.cfg.mode == "fixed_batch":
-            yield from self._iter_fixed()
-        else:
+    def _read_fixed(self, shard, start, end):
+        """Returns (inputs [B, S], targets [B, S]) on CPU."""
+        buf = _read_tokens_slice(shard, start, end)
+        buf = buf.view(self.cfg.batch_size, self.cfg.seq_len + 1)
+        return buf[:, :-1], buf[:, 1:]
+
+    def __iter__(self) -> Iterator[Tuple[torch.Tensor, ...]]:
+        if self.cfg.mode not in ("varlen_packed", "fixed_batch"):
             raise ValueError(f"Unknown mode: {self.cfg.mode}")
+        read = (
+            self._read_varlen
+            if self.cfg.mode == "varlen_packed"
+            else self._read_fixed
+        )
+
+        consumer, n_consumers, skip = self._consumer()
+        g = consumer + skip * n_consumers  # next global batch for this reader
+        base = 0  # global index of the current file's first batch
+        for shard, first, stride, span, n in self._layout():
+            while g < base + n:
+                if self._should_stop():
+                    return
+                start = first + (g - base) * stride
+                end = min(start + span, shard["num_tokens"])
+                batch = read(shard, start, end)
+                self._batch_count += 1
+                self._token_count += batch[0].numel()
+                yield batch
+                g += n_consumers
+            base += n
 
 
 # =============================================================================

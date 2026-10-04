@@ -237,7 +237,12 @@ analysis callbacks, XSA.
   torch-xla). Rent (vast.ai) later. Code must run on 1 GPU and 8 GPUs; multi-node later.
   - T4/P100 have no bf16 and no flash-attn 2 → fp16 + GradScaler and SDPA fallback must work.
   - Sessions end after ~12 h → full, frequent, time-triggered resume is the top priority.
-- **Tokenizer**: reuse an open tokenizer with chat tokens (dolma2 ~100K or Qwen3 ~151K).
+- **Tokenizer** (2026-10-04): the standard **Qwen3** tokenizer, unchanged (151,669 tokens; pad the
+  embedding to 151,936). Single-digit numbers, `<think>`, tool-call and FIM tokens; Qwen3 models can be
+  logit-level teachers. Shards become uint32. Vocabulary pruning (~105K, ~10% faster steps) was
+  considered and dropped as not worth the work; ~45K CJK/Cyrillic/Arabic rows simply stay unused.
+- **Data language**: English + code + math only; filter non-English samples (and traces that switch
+  language) out of mid-/post-training data.
 - **Architecture**: attention MoE first (on GQA/XSA). Gated DeltaNet / Mamba-2 after.
 - **Post-training**: SFT → DPO → on-policy distillation → small RLVR.
 - **Purpose**: learning + a public result (HF release, report with one clean ablation question, reproducible code).

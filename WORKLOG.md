@@ -18,7 +18,7 @@ Architecture experiments now branch from `arch/base` (a copy of `main` at `ecc6c
 | Checkpoints | `utils/checkpoint.py`: model, optimizer, scheduler, scaler, counters, data position, RNG; atomic write; `keep_last` + `keep_every_steps` milestones; optional push/pull of the newest checkpoint to a private HF repo. Replaces `CheckpointCallback`. |
 | Resume | `run_name` gives a stable run folder; `resume: auto` continues from its newest checkpoint. `init_from` loads weights only (next stage). |
 | Session limits | `max_runtime_minutes` and SIGTERM save and exit cleanly; `save_every_minutes` saves on a timer. |
-| Data | One global batch order; rank/worker `c` takes batches `c, c+n, ...`; resume skips consumed batches without reading their tokens. |
+| Data | One global batch order; rank/worker `c` takes batches `c, c+n, ...`. No BOS pre-scan: since the tail fix every batch is the next `packed_tokens+1` tokens, so batch `g`'s file and offset are arithmetic, and its `cu_seqlens` come from its own tokens. Matches the old scan-based packer batch-for-batch; reaching batch 25,000 on resume went from 192 s to ~0 s. |
 | DDP | `torchrun` works; `no_sync` during accumulation; stop/exhaust/save decisions are OR-ed over ranks so no rank waits forever; NaN steps are skipped on all ranks together via the (global) grad norm. |
 | Precision | `precision: auto` → bf16 on Ampere+, fp16 on T4/V100/P100. |
 | LR | `wsd` (from transformers) and `power` (Rigel's; transformers has none) schedules. |

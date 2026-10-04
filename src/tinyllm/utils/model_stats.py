@@ -68,16 +68,26 @@ def count_params(model: nn.Module) -> dict:
 def flops_per_token(
     model_config, active_non_embedding: int, seq_len: int
 ) -> float:
-    """Training FLOPs per token: 6N plus causal attention (~6 * L * d_attn * T).
+    """Training FLOPs per token: 6N + output layer + causal attention.
 
-    Full attention costs 12 * L * d_attn * T per token for fwd+bwd; causal
-    masking halves it. ``seq_len`` is the average document length the model
-    attends over (per-document varlen packing never attends across documents).
+    - 6N over active non-embedding params (Kaplan).
+    - The output projection (lm_head, d_model x vocab) is a real matmul even
+      when tied to the input embedding, which is only a lookup: 6 * d * V.
+      In small models it is a large share — about half the FLOPs at
+      d=512 / V=50K, and ~1/3 at d=1024 / V=151K.
+    - Full attention costs 12 * L * d_attn * T per token for fwd+bwd; causal
+      masking halves it. ``seq_len`` is the average document length the model
+      attends over (per-document varlen packing never attends across documents).
     """
     blocks = model_config.get("blocks", {}) or {}
     n_layers = int(blocks.get("count", 0))
-    d_attn = int(model_config.get("d_model", 0))
-    return 6.0 * active_non_embedding + 6.0 * n_layers * d_attn * seq_len
+    d_model = int(model_config.get("d_model", 0))
+    vocab = int(model_config.get("vocab_size", 0))
+    return (
+        6.0 * active_non_embedding
+        + 6.0 * d_model * vocab
+        + 6.0 * n_layers * d_model * seq_len
+    )
 
 
 def peak_flops(device_name: str) -> float | None:
